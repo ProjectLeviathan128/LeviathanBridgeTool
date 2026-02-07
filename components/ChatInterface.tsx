@@ -46,6 +46,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
     const activeThread = threads.find(t => t.id === activeThreadId) || threads[0];
 
+    useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [activeThread?.messages, activeThread?.status]);
+
     // Guard: If no threads exist yet (initial load), show loading state
     if (!activeThread) {
         return (
@@ -71,10 +75,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             }]
         });
     };
-
-    useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [activeThread?.messages, activeThread?.status]);
 
     // Helper to update a specific thread safely
     const updateThread = (id: string, updates: Partial<ChatThread>) => {
