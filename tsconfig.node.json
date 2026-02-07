@@ -1,3 +1,12 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:31148e3e0b4842ce0500e096d6d15ec04339f4e30b2f6078ca020baf027f6f52
-size 252
+{
+    "compilerOptions": {
+        "composite": true,
+        "skipLibCheck": true,
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "allowSyntheticDefaultImports": true
+    },
+    "include": [
+        "vite.config.ts"
+    ]
+}

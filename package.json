@@ -1,3 +1,37 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:dadabf69d269d6ace0d3fc691923af5012fba28afdfe3eb6079d45ca4cbbd598
-size 1154
+{
+    "name": "leviathan-bridge",
+    "private": true,
+    "version": "0.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "tsc && vite build",
+        "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+        "preview": "vite preview",
+        "share": "ssh -R 80:localhost:3000 -o StrictHostKeyChecking=no nokey@localhost.run",
+        "test": "vitest"
+    },
+    "dependencies": {
+        "@types/papaparse": "^5.5.2",
+        "lucide-react": "^0.344.0",
+        "papaparse": "^5.5.3",
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0",
+        "recharts": "^2.12.0"
+    },
+    "devDependencies": {
+        "@tailwindcss/postcss": "^4.1.18",
+        "@testing-library/jest-dom": "^6.9.1",
+        "@testing-library/react": "^16.3.2",
+        "@types/react": "^18.2.66",
+        "@types/react-dom": "^18.2.22",
+        "@vitejs/plugin-react": "^4.2.1",
+        "autoprefixer": "^10.4.24",
+        "jsdom": "^28.0.0",
+        "postcss": "^8.5.6",
+        "tailwindcss": "^4.1.18",
+        "typescript": "^5.2.2",
+        "vite": "^5.2.0",
+        "vitest": "^4.0.18"
+    }
+}
