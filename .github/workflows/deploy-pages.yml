@@ -36,6 +36,29 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Add Legacy Asset Aliases
+        run: |
+          set -euo pipefail
+
+          current_js="$(ls dist/assets/index-*.js | grep -v 'csvService' | head -n 1)"
+          current_css="$(ls dist/assets/index-*.css | head -n 1)"
+
+          for legacy_js in \
+            index-E6pDgA8L.js \
+            index-AwmPLhRM.js \
+            index-DozNYhF2.js; do
+            if [ "$(basename "$current_js")" != "$legacy_js" ]; then
+              cp "$current_js" "dist/assets/$legacy_js"
+            fi
+          done
+
+          for legacy_css in \
+            index-DWcEkJ5e.css; do
+            if [ "$(basename "$current_css")" != "$legacy_css" ]; then
+              cp "$current_css" "dist/assets/$legacy_css"
+            fi
+          done
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
