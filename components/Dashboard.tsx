@@ -22,20 +22,27 @@ import {
   AlertTriangle,
   Clock3,
   Compass,
+  Flag,
   Fingerprint,
   Hourglass,
   Link2,
+  MousePointer2,
   ShieldCheck,
   Target,
+  Trash2,
   TrendingUp,
   Users,
 } from 'lucide-react';
 
 interface DashboardProps {
   contacts: Contact[];
+  onSelectContact?: (contactId: string) => void;
+  onDeleteContact?: (contactId: string) => void;
+  onToggleFlag?: (contactId: string) => void;
 }
 
 interface ScatterPoint {
+  id: string;
   name: string;
   x: number;
   y: number;
@@ -43,6 +50,7 @@ interface ScatterPoint {
   confidence: number;
   track: string;
   status: Contact['status'];
+  teamFlagged: boolean;
 }
 
 interface PriorityItem {
@@ -52,6 +60,7 @@ interface PriorityItem {
   confidence: number;
   track: string;
   action: string;
+  teamFlagged: boolean;
 }
 
 interface RiskItem {
@@ -59,6 +68,7 @@ interface RiskItem {
   name: string;
   severity: number;
   reason: string;
+  teamFlagged: boolean;
 }
 
 interface DomainCount {
@@ -113,7 +123,12 @@ function formatWhen(iso?: string): string {
   });
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
+const Dashboard: React.FC<DashboardProps> = ({
+  contacts,
+  onSelectContact,
+  onDeleteContact,
+  onToggleFlag,
+}) => {
   const data = useMemo(() => {
     const total = contacts.length;
     const pendingCount = contacts.filter((c) => c.status === 'New').length;
@@ -157,6 +172,7 @@ const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
     const scatterData: ScatterPoint[] = contacts
       .filter((c): c is Contact & { scores: NonNullable<Contact['scores']> } => Boolean(c.scores))
       .map((c) => ({
+        id: c.id,
         name: c.name,
         x: c.scores.investorFit.score,
         y: c.scores.valuesAlignment.score,
@@ -164,6 +180,7 @@ const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
         confidence: c.scores.overallConfidence,
         track: bucketTrack(c),
         status: c.status,
+        teamFlagged: Boolean(c.teamFlagged),
       }));
 
     const confidenceBands = [
@@ -227,6 +244,7 @@ const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
           confidence: c.scores.overallConfidence,
           track: bucketTrack(c),
           action: c.enrichment.recommendedAction,
+          teamFlagged: Boolean(c.teamFlagged),
         };
       })
       .sort((a, b) => b.score - a.score)
@@ -262,6 +280,7 @@ const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
           name: c.name,
           severity,
           reason,
+          teamFlagged: Boolean(c.teamFlagged),
         };
       })
       .sort((a, b) => b.severity - a.severity)
@@ -299,6 +318,7 @@ const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
         id: contact.id,
         name: contact.name,
         when: formatWhen(contact.enrichment?.lastVerified),
+        teamFlagged: Boolean(contact.teamFlagged),
       }));
 
     const pipelineHealth = clamp(
@@ -428,7 +448,13 @@ const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
               </h3>
               <p className="text-xs text-slate-400">Investor Fit (X) vs Values Alignment (Y)</p>
             </div>
-            <span className="text-xs text-slate-400">{data.scatterData.length} scored contacts</span>
+            <div className="text-right">
+              <span className="text-xs text-slate-400 block">{data.scatterData.length} scored contacts</span>
+              <span className="text-[10px] text-slate-500 inline-flex items-center gap-1 mt-1">
+                <MousePointer2 size={10} />
+                click a dot to open
+              </span>
+            </div>
           </div>
           <div className="flex-1 min-h-0">
             <ResponsiveContainer width="100%" height="100%">
@@ -472,10 +498,18 @@ const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
                     );
                   }}
                 />
-                <Scatter data={data.scatterData} fill="#3b82f6">
+                <Scatter
+                  data={data.scatterData}
+                  fill="#3b82f6"
+                  onClick={(point: any) => {
+                    const selectedId = typeof point?.id === 'string' ? point.id : null;
+                    if (selectedId && onSelectContact) onSelectContact(selectedId);
+                  }}
+                  cursor={onSelectContact ? 'pointer' : 'default'}
+                >
                   {data.scatterData.map((point) => (
                     <Cell
-                      key={point.name}
+                      key={point.id}
                       fill={
                         point.x >= 70 && point.y >= 70
                           ? '#10b981'
@@ -593,7 +627,11 @@ const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
               <p className="text-sm text-slate-500">No scored opportunities available yet.</p>
             )}
             {data.priorityQueue.map((item) => (
-              <div key={item.id} className="bg-slate-900 border border-slate-700 rounded-lg p-3">
+              <div
+                key={item.id}
+                className="bg-slate-900 border border-slate-700 rounded-lg p-3 cursor-pointer hover:border-blue-700/60 transition-colors"
+                onClick={() => onSelectContact?.(item.id)}
+              >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="text-sm font-semibold text-white truncate">{item.name}</p>
@@ -603,6 +641,35 @@ const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
                   <div className="text-right shrink-0">
                     <p className="text-emerald-300 text-lg font-bold leading-none">{item.score}</p>
                     <p className="text-[11px] text-slate-400 mt-1">{item.confidence}% conf</p>
+                    <div className="flex items-center justify-end gap-1 mt-2">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onToggleFlag?.(item.id);
+                        }}
+                        className={`p-1 rounded border transition-colors ${
+                          item.teamFlagged
+                            ? 'text-amber-300 border-amber-600/60 bg-amber-900/30'
+                            : 'text-slate-400 border-slate-600 hover:text-amber-300 hover:border-amber-600/50'
+                        }`}
+                        title={item.teamFlagged ? 'Unflag contact' : 'Flag contact'}
+                      >
+                        <Flag size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (!window.confirm(`Delete ${item.name}? This cannot be undone.`)) return;
+                          onDeleteContact?.(item.id);
+                        }}
+                        className="p-1 rounded border border-slate-600 text-slate-400 hover:text-red-300 hover:border-red-600/50 transition-colors"
+                        title="Delete contact"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -618,23 +685,58 @@ const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
               <p className="text-sm text-slate-500">No active risk flags.</p>
             )}
             {data.riskQueue.map((item) => (
-              <div key={item.id} className="bg-slate-900 border border-slate-700 rounded-lg p-3">
+              <div
+                key={item.id}
+                className="bg-slate-900 border border-slate-700 rounded-lg p-3 cursor-pointer hover:border-blue-700/60 transition-colors"
+                onClick={() => onSelectContact?.(item.id)}
+              >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="text-sm font-semibold text-white truncate">{item.name}</p>
                     <p className="text-xs text-slate-300 mt-1">{item.reason}</p>
                   </div>
-                  <span
-                    className={`text-[11px] font-bold px-2 py-1 rounded border ${
-                      item.severity >= 6
-                        ? 'text-red-300 border-red-500/40 bg-red-900/30'
-                        : item.severity >= 4
-                          ? 'text-amber-300 border-amber-500/40 bg-amber-900/20'
-                          : 'text-slate-300 border-slate-600 bg-slate-800'
-                    }`}
-                  >
-                    S{item.severity}
-                  </span>
+                  <div className="text-right shrink-0">
+                    <span
+                      className={`text-[11px] font-bold px-2 py-1 rounded border ${
+                        item.severity >= 6
+                          ? 'text-red-300 border-red-500/40 bg-red-900/30'
+                          : item.severity >= 4
+                            ? 'text-amber-300 border-amber-500/40 bg-amber-900/20'
+                            : 'text-slate-300 border-slate-600 bg-slate-800'
+                      }`}
+                    >
+                      S{item.severity}
+                    </span>
+                    <div className="flex items-center justify-end gap-1 mt-2">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onToggleFlag?.(item.id);
+                        }}
+                        className={`p-1 rounded border transition-colors ${
+                          item.teamFlagged
+                            ? 'text-amber-300 border-amber-600/60 bg-amber-900/30'
+                            : 'text-slate-400 border-slate-600 hover:text-amber-300 hover:border-amber-600/50'
+                        }`}
+                        title={item.teamFlagged ? 'Unflag contact' : 'Flag contact'}
+                      >
+                        <Flag size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (!window.confirm(`Delete ${item.name}? This cannot be undone.`)) return;
+                          onDeleteContact?.(item.id);
+                        }}
+                        className="p-1 rounded border border-slate-600 text-slate-400 hover:text-red-300 hover:border-red-600/50 transition-colors"
+                        title="Delete contact"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             ))}
@@ -681,8 +783,19 @@ const Dashboard: React.FC<DashboardProps> = ({ contacts }) => {
               <p className="text-sm text-slate-500">No recent verification events.</p>
             )}
             {data.latestVerified.map((entry) => (
-              <div key={entry.id} className="bg-slate-900 border border-slate-700 rounded-lg p-3">
-                <p className="text-sm text-white truncate">{entry.name}</p>
+              <div
+                key={entry.id}
+                className="bg-slate-900 border border-slate-700 rounded-lg p-3 cursor-pointer hover:border-blue-700/60 transition-colors"
+                onClick={() => onSelectContact?.(entry.id)}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm text-white truncate">{entry.name}</p>
+                  {entry.teamFlagged && (
+                    <span className="text-[10px] uppercase tracking-wider text-amber-300 border border-amber-600/50 bg-amber-900/30 px-1.5 py-0.5 rounded">
+                      Flagged
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
                   <Clock3 size={12} />
                   {entry.when}

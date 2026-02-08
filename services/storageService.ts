@@ -14,6 +14,7 @@ const BASE_KEYS = {
     THREADS: 'threads',
     SETTINGS: 'settings',
     ORGANIZATION: 'organization',
+    INGESTION_HISTORY: 'ingestion_history',
 } as const;
 
 // Get the actual storage key (prefixed if user is logged in)
@@ -59,7 +60,7 @@ function safeJsonParse<T>(json: string | null, fallback: T): T {
 // =====================
 // CONTACTS
 // =====================
-import { Contact, AppSettings, ChatThread, ThesisChunk, SyncState, Organization } from '../types';
+import { Contact, AppSettings, ChatThread, ThesisChunk, SyncState, Organization, IngestionHistoryItem } from '../types';
 
 export function saveContacts(contacts: Contact[]): void {
     try {
@@ -90,6 +91,23 @@ export const saveKnowledgeDebounced = debounce(saveKnowledge, 500);
 
 export function loadKnowledge(): ThesisChunk[] {
     return safeJsonParse(localStorage.getItem(getStorageKey(BASE_KEYS.KNOWLEDGE)), []);
+}
+
+// =====================
+// INGESTION HISTORY
+// =====================
+export function saveIngestionHistory(history: IngestionHistoryItem[]): void {
+    try {
+        localStorage.setItem(getStorageKey(BASE_KEYS.INGESTION_HISTORY), JSON.stringify(history));
+    } catch (e) {
+        console.error('Failed to save ingestion history:', e);
+    }
+}
+
+export const saveIngestionHistoryDebounced = debounce(saveIngestionHistory, 500);
+
+export function loadIngestionHistory(): IngestionHistoryItem[] {
+    return safeJsonParse(localStorage.getItem(getStorageKey(BASE_KEYS.INGESTION_HISTORY)), []);
 }
 
 // =====================
@@ -221,6 +239,7 @@ export function exportAllData(): string {
     const data = {
         contacts: loadContacts(),
         knowledge: loadKnowledge(),
+        ingestionHistory: loadIngestionHistory(),
         threads: loadThreads(),
         settings: loadSettings(),
         organization: loadOrganization(),
@@ -234,6 +253,7 @@ export function importAllData(jsonString: string): boolean {
         const data = JSON.parse(jsonString);
         if (data.contacts) saveContacts(data.contacts);
         if (data.knowledge) saveKnowledge(data.knowledge);
+        if (data.ingestionHistory) saveIngestionHistory(data.ingestionHistory);
         if (data.threads) saveThreads(data.threads);
         if (data.settings) saveSettings(data.settings);
         if ('organization' in data) saveOrganization(data.organization || null);
@@ -281,6 +301,7 @@ export async function saveToCloud(): Promise<SyncState> {
         const dataPackage = {
             contacts: loadContacts(),
             knowledge: loadKnowledge(),
+            ingestionHistory: loadIngestionHistory(),
             threads: loadThreads(),
             settings: loadSettings(),
             organization: loadOrganization(),
@@ -307,12 +328,20 @@ export const saveToCloudDebounced = debounce(saveToCloud, 2000);
 export async function loadFromCloud(): Promise<{
     contacts: Contact[] | null;
     knowledge: ThesisChunk[] | null;
+    ingestionHistory: IngestionHistoryItem[] | null;
     threads: ChatThread[] | null;
     settings: AppSettings | null;
     organization: Organization | null;
 }> {
     if (typeof puter === 'undefined' || !puter.auth.isSignedIn()) {
-        return { contacts: null, knowledge: null, threads: null, settings: null, organization: null };
+        return {
+            contacts: null,
+            knowledge: null,
+            ingestionHistory: null,
+            threads: null,
+            settings: null,
+            organization: null
+        };
     }
 
     try {
@@ -324,16 +353,33 @@ export async function loadFromCloud(): Promise<{
             content = await file.text();
         } catch (err) {
             console.warn('No cloud backup found or read error:', err);
-            return { contacts: null, knowledge: null, threads: null, settings: null, organization: null };
+            return {
+                contacts: null,
+                knowledge: null,
+                ingestionHistory: null,
+                threads: null,
+                settings: null,
+                organization: null
+            };
         }
 
-        if (!content) return { contacts: null, knowledge: null, threads: null, settings: null, organization: null };
+        if (!content) {
+            return {
+                contacts: null,
+                knowledge: null,
+                ingestionHistory: null,
+                threads: null,
+                settings: null,
+                organization: null
+            };
+        }
 
         const data = JSON.parse(content);
 
         // Update local state
         if (data.contacts) saveContacts(data.contacts);
         if (data.knowledge) saveKnowledge(data.knowledge);
+        if (data.ingestionHistory) saveIngestionHistory(data.ingestionHistory);
         if (data.threads) saveThreads(data.threads);
         if (data.settings) saveSettings(data.settings);
         if ('organization' in data) saveOrganization(data.organization || null);
@@ -346,6 +392,7 @@ export async function loadFromCloud(): Promise<{
         return {
             contacts: data.contacts,
             knowledge: data.knowledge,
+            ingestionHistory: data.ingestionHistory,
             threads: data.threads,
             settings: data.settings,
             organization: data.organization || null
@@ -353,6 +400,13 @@ export async function loadFromCloud(): Promise<{
 
     } catch (e) {
         console.error('Cloud load failed:', e);
-        return { contacts: null, knowledge: null, threads: null, settings: null, organization: null };
+        return {
+            contacts: null,
+            knowledge: null,
+            ingestionHistory: null,
+            threads: null,
+            settings: null,
+            organization: null
+        };
     }
 }

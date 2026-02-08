@@ -15,6 +15,7 @@ import {
   loadThreads, saveThreadsDebounced,
   loadSettings, saveSettings,
   loadKnowledge,
+  loadIngestionHistory, saveIngestionHistoryDebounced,
   loadFromCloud, saveToCloudDebounced, saveToCloud,
   setCurrentUser, clearCurrentUserData, loadSyncState, saveSyncState,
   loadOrganization, saveOrganizationDebounced
@@ -172,6 +173,7 @@ const App: React.FC = () => {
     const loadedSettings = loadSettings();
     const loadedSyncState = loadSyncState();
     const loadedKnowledge = loadKnowledge();
+    const loadedIngestionHistory = loadIngestionHistory();
     const loadedOrganization = loadOrganization();
 
     setContacts(loadedContacts);
@@ -179,6 +181,7 @@ const App: React.FC = () => {
     setActiveThreadId(loadedThreads.length > 0 ? loadedThreads[0].id : 'default');
     setSettings(loadedSettings);
     setSyncState(loadedSyncState);
+    setIngestionHistory(loadedIngestionHistory);
     setOrganization(loadedOrganization);
 
     bridgeMemory.initialize(loadedKnowledge);
@@ -188,6 +191,7 @@ const App: React.FC = () => {
       contacts: loadedContacts.length,
       threads: loadedThreads.length,
       knowledgeChunks: loadedKnowledge.length,
+      ingestionHistory: loadedIngestionHistory.length,
       organization: loadedOrganization?.id || null
     });
   }, [syncOrganizationContext]);
@@ -210,6 +214,7 @@ const App: React.FC = () => {
     setActiveThreadId('default');
     setSettings({ focusMode: 'BALANCED', analysisModel: 'quality' });
     setSyncState({ status: 'idle', lastSyncedAt: null });
+    setIngestionHistory([]);
     setOrganization(null);
     setOrgMessage(null);
     bridgeMemory.clear();
@@ -245,6 +250,7 @@ const App: React.FC = () => {
               bridgeMemory.initialize(cloudData.knowledge);
               setThesisVersion(v => v + 1);
             }
+            if (cloudData.ingestionHistory) setIngestionHistory(cloudData.ingestionHistory);
             if (cloudData.organization) {
               setOrganization(cloudData.organization);
               syncOrganizationContext(cloudData.organization);
@@ -299,6 +305,19 @@ const App: React.FC = () => {
     if (user) saveToCloudDebounced();
   }, [organization, isSynced, user]);
 
+  // Persist ingestion history when it changes (Local + Cloud)
+  useEffect(() => {
+    if (!isSynced) return;
+    saveIngestionHistoryDebounced(ingestionHistory);
+    if (user) saveToCloudDebounced();
+  }, [ingestionHistory, isSynced, user]);
+
+  // Trigger cloud sync after thesis/context changes
+  useEffect(() => {
+    if (!isSynced || !user) return;
+    saveToCloudDebounced();
+  }, [thesisVersion, isSynced, user]);
+
   useEffect(() => {
     if (!user || !organization) return;
 
@@ -348,6 +367,7 @@ const App: React.FC = () => {
           bridgeMemory.initialize(cloudData.knowledge);
           setThesisVersion(v => v + 1);
         }
+        if (cloudData.ingestionHistory) setIngestionHistory(cloudData.ingestionHistory);
         if (cloudData.organization) {
           setOrganization(cloudData.organization);
           syncOrganizationContext(cloudData.organization);
@@ -401,6 +421,54 @@ const App: React.FC = () => {
     setSelectedContact(updated);
   };
 
+  const handleDeleteContacts = (contactIds: string[]) => {
+    if (contactIds.length === 0) return;
+    const targets = new Set(contactIds);
+    setContacts(prev => prev.filter(contact => !targets.has(contact.id)));
+    setSelectedContact(prev => (prev && targets.has(prev.id) ? null : prev));
+    debugWarn('contacts', 'Contacts deleted.', { count: contactIds.length });
+  };
+
+  const handleDeleteContact = (contactId: string) => {
+    handleDeleteContacts([contactId]);
+  };
+
+  const handleToggleTeamFlag = (contactId: string) => {
+    setContacts(prev => prev.map(contact => (
+      contact.id === contactId
+        ? { ...contact, teamFlagged: !contact.teamFlagged }
+        : contact
+    )));
+
+    setSelectedContact(prev => (
+      prev && prev.id === contactId
+        ? { ...prev, teamFlagged: !prev.teamFlagged }
+        : prev
+    ));
+  };
+
+  const handleSetContactLists = (contactId: string, lists: string[]) => {
+    const normalized = [...new Set(lists.map(list => list.trim()).filter(Boolean))];
+    setContacts(prev => prev.map(contact => (
+      contact.id === contactId
+        ? { ...contact, lists: normalized }
+        : contact
+    )));
+
+    setSelectedContact(prev => (
+      prev && prev.id === contactId
+        ? { ...prev, lists: normalized }
+        : prev
+    ));
+  };
+
+  const handleOpenContactFromDashboard = (contactId: string) => {
+    const match = contacts.find(contact => contact.id === contactId);
+    if (!match) return;
+    setActiveTab('contacts');
+    setSelectedContact(match);
+  };
+
   const handleBatchUpdateContacts = (updates: Contact[]) => {
     setContacts(prev => {
       const newContacts = [...prev];
@@ -410,6 +478,11 @@ const App: React.FC = () => {
       });
       return newContacts;
     });
+
+    if (selectedContact) {
+      const updatedSelected = updates.find(update => update.id === selectedContact.id);
+      if (updatedSelected) setSelectedContact(updatedSelected);
+    }
   };
 
   const handleIngestContacts = (newContacts: Contact[]) => {
@@ -704,9 +777,23 @@ const App: React.FC = () => {
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard':
-        return <Dashboard contacts={contacts} />;
+        return (
+          <Dashboard
+            contacts={contacts}
+            onSelectContact={handleOpenContactFromDashboard}
+            onDeleteContact={handleDeleteContact}
+            onToggleFlag={handleToggleTeamFlag}
+          />
+        );
       case 'contacts':
-        return <ContactList contacts={contacts} onSelectContact={setSelectedContact} />;
+        return (
+          <ContactList
+            contacts={contacts}
+            onSelectContact={setSelectedContact}
+            onBatchUpdateContacts={handleBatchUpdateContacts}
+            onDeleteContacts={handleDeleteContacts}
+          />
+        );
       case 'upload':
         return (
           <UploadZone
@@ -888,6 +975,9 @@ const App: React.FC = () => {
             contact={selectedContact}
             onClose={() => setSelectedContact(null)}
             onUpdate={handleUpdateContact}
+            onDelete={handleDeleteContact}
+            onToggleFlag={handleToggleTeamFlag}
+            onSetLists={handleSetContactLists}
             settings={settings}
           />
         )}

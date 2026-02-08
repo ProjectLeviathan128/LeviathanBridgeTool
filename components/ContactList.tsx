@@ -1,15 +1,25 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Contact } from '../types';
-import { Search, ChevronRight, AlertTriangle, X, SlidersHorizontal, Check } from 'lucide-react';
+import { Search, ChevronRight, AlertTriangle, X, SlidersHorizontal, Check, Flag, Trash2, Plus, ListChecks } from 'lucide-react';
 
 interface ContactListProps {
     contacts: Contact[];
     onSelectContact: (contact: Contact) => void;
+    onBatchUpdateContacts: (updates: Contact[]) => void;
+    onDeleteContacts: (contactIds: string[]) => void;
 }
 
-const ContactList: React.FC<ContactListProps> = ({ contacts, onSelectContact }) => {
+const ContactList: React.FC<ContactListProps> = ({
+    contacts,
+    onSelectContact,
+    onBatchUpdateContacts,
+    onDeleteContacts,
+}) => {
     const [searchTerm, setSearchTerm] = useState('');
     const [isFilterOpen, setIsFilterOpen] = useState(false);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const [listInput, setListInput] = useState('');
+    const [listFilter, setListFilter] = useState('All');
 
     // Advanced Filter State
     const [filters, setFilters] = useState({
@@ -25,6 +35,17 @@ const ContactList: React.FC<ContactListProps> = ({ contacts, onSelectContact }) 
         hasNotes: false,
         isFlagged: false
     });
+
+    const allLists = useMemo(() => {
+        const names = new Set<string>();
+        contacts.forEach(contact => {
+            (contact.lists || []).forEach(list => {
+                const normalized = list.trim();
+                if (normalized) names.add(normalized);
+            });
+        });
+        return Array.from(names).sort((a, b) => a.localeCompare(b));
+    }, [contacts]);
 
     // Intelligent Filtering Logic
     const filteredContacts = useMemo(() => {
@@ -57,9 +78,12 @@ const ContactList: React.FC<ContactListProps> = ({ contacts, onSelectContact }) 
 
             // 6. Boolean Flags
             if (filters.hasNotes && !c.rawText) return false;
-            if (filters.isFlagged && (!c.enrichment?.flaggedAttributes || c.enrichment.flaggedAttributes.length === 0)) return false;
+            if (filters.isFlagged && !c.teamFlagged && (!c.enrichment?.flaggedAttributes || c.enrichment.flaggedAttributes.length === 0)) return false;
 
-            // 7. Score Thresholds
+            // 7. List Filter
+            if (listFilter !== 'All' && !(c.lists || []).includes(listFilter)) return false;
+
+            // 8. Score Thresholds
             if (filters.minInvestorScore > 0 && (!c.scores || c.scores.investorFit.score < filters.minInvestorScore)) return false;
             if (filters.minValuesScore > 0 && (!c.scores || c.scores.valuesAlignment.score < filters.minValuesScore)) return false;
             if (filters.minGovtScore > 0 && (!c.scores || c.scores.govtAccess.score < filters.minGovtScore)) return false;
@@ -68,13 +92,14 @@ const ContactList: React.FC<ContactListProps> = ({ contacts, onSelectContact }) 
 
             return true;
         });
-    }, [contacts, searchTerm, filters]);
+    }, [contacts, searchTerm, filters, listFilter]);
 
     const activeFilterCount =
         (filters.status !== 'All' ? 1 : 0) +
         (filters.track !== 'All' ? 1 : 0) +
         (filters.location ? 1 : 0) +
         (filters.source ? 1 : 0) +
+        (listFilter !== 'All' ? 1 : 0) +
         (filters.hasNotes ? 1 : 0) +
         (filters.isFlagged ? 1 : 0) +
         (filters.minInvestorScore > 0 ? 1 : 0) +
@@ -98,7 +123,91 @@ const ContactList: React.FC<ContactListProps> = ({ contacts, onSelectContact }) 
             isFlagged: false
         });
         setSearchTerm('');
+        setListFilter('All');
     };
+
+    const filteredIds = useMemo(() => filteredContacts.map(contact => contact.id), [filteredContacts]);
+    const selectedCount = selectedIds.size;
+
+    const toggleSelected = (contactId: string) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(contactId)) next.delete(contactId);
+            else next.add(contactId);
+            return next;
+        });
+    };
+
+    const toggleSelectAllFiltered = () => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            const allSelected = filteredIds.every(id => next.has(id));
+            if (allSelected) {
+                filteredIds.forEach(id => next.delete(id));
+            } else {
+                filteredIds.forEach(id => next.add(id));
+            }
+            return next;
+        });
+    };
+
+    const applyUpdatesToSelected = (updateFn: (contact: Contact) => Contact) => {
+        const updates = contacts
+            .filter(contact => selectedIds.has(contact.id))
+            .map(updateFn);
+
+        if (updates.length > 0) onBatchUpdateContacts(updates);
+    };
+
+    const handleBulkFlag = (flagged: boolean) => {
+        applyUpdatesToSelected(contact => ({ ...contact, teamFlagged: flagged }));
+    };
+
+    const handleBulkAddToList = () => {
+        const normalized = listInput.trim();
+        if (!normalized) return;
+
+        applyUpdatesToSelected(contact => ({
+            ...contact,
+            lists: [...new Set([...(contact.lists || []), normalized])]
+        }));
+
+        setListInput('');
+        setListFilter(normalized);
+    };
+
+    const handleBulkDelete = () => {
+        const targetIds = Array.from(selectedIds);
+        if (targetIds.length === 0) return;
+        if (!window.confirm(`Delete ${targetIds.length} selected contacts? This cannot be undone.`)) return;
+        onDeleteContacts(targetIds);
+        setSelectedIds(new Set());
+    };
+
+    const handleToggleSingleFlag = (contact: Contact) => {
+        onBatchUpdateContacts([{ ...contact, teamFlagged: !contact.teamFlagged }]);
+    };
+
+    const handleDeleteSingle = (contact: Contact) => {
+        if (!window.confirm(`Delete ${contact.name}? This cannot be undone.`)) return;
+        onDeleteContacts([contact.id]);
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            next.delete(contact.id);
+            return next;
+        });
+    };
+
+    useEffect(() => {
+        const validIds = new Set(contacts.map(contact => contact.id));
+        setSelectedIds(prev => {
+            const next = new Set<string>();
+            prev.forEach(id => {
+                if (validIds.has(id)) next.add(id);
+            });
+            return next;
+        });
+    }, [contacts]);
 
     return (
         <div className="flex h-full gap-4">
@@ -117,18 +226,82 @@ const ContactList: React.FC<ContactListProps> = ({ contacts, onSelectContact }) 
                         />
                     </div>
 
+                    <div className="flex items-center gap-2">
+                        <select
+                            value={listFilter}
+                            onChange={(e) => setListFilter(e.target.value)}
+                            className="bg-slate-900 border border-slate-700 text-slate-300 rounded px-2 py-2 text-sm focus:outline-none focus:border-blue-500"
+                            title="Filter by list"
+                        >
+                            <option value="All">All Lists</option>
+                            {allLists.map(list => (
+                                <option key={list} value={list}>{list}</option>
+                            ))}
+                        </select>
+
+                        <button
+                            onClick={() => setIsFilterOpen(!isFilterOpen)}
+                            className={`flex items-center gap-2 px-4 py-2.5 rounded border transition-colors font-medium text-sm ${isFilterOpen || activeFilterCount > 0 ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-700'}`}
+                        >
+                            <SlidersHorizontal size={16} />
+                            Filters
+                            {activeFilterCount > 0 && (
+                                <span className="bg-white text-blue-600 text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[1.25rem] text-center">
+                                    {activeFilterCount}
+                                </span>
+                            )}
+                        </button>
+                    </div>
+                </div>
+
+                <div className="px-4 py-3 border-b border-slate-700 bg-slate-900/80 flex flex-wrap items-center gap-2">
                     <button
-                        onClick={() => setIsFilterOpen(!isFilterOpen)}
-                        className={`flex items-center gap-2 px-4 py-2.5 rounded border transition-colors font-medium text-sm ${isFilterOpen || activeFilterCount > 0 ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-700'}`}
+                        onClick={toggleSelectAllFiltered}
+                        className="px-3 py-1.5 text-xs rounded border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors"
                     >
-                        <SlidersHorizontal size={16} />
-                        Filters
-                        {activeFilterCount > 0 && (
-                            <span className="bg-white text-blue-600 text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[1.25rem] text-center">
-                                {activeFilterCount}
-                            </span>
-                        )}
+                        {filteredIds.length > 0 && filteredIds.every(id => selectedIds.has(id)) ? 'Unselect Filtered' : 'Select Filtered'}
                     </button>
+                    <span className="text-xs text-slate-400">{selectedCount} selected</span>
+                    {selectedCount > 0 && (
+                        <>
+                            <button
+                                onClick={() => handleBulkFlag(true)}
+                                className="px-3 py-1.5 text-xs rounded border border-amber-700/50 text-amber-300 hover:bg-amber-900/20 transition-colors inline-flex items-center gap-1"
+                            >
+                                <Flag size={12} />
+                                Flag
+                            </button>
+                            <button
+                                onClick={() => handleBulkFlag(false)}
+                                className="px-3 py-1.5 text-xs rounded border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors"
+                            >
+                                Unflag
+                            </button>
+                            <div className="flex items-center gap-1 ml-1">
+                                <input
+                                    type="text"
+                                    value={listInput}
+                                    onChange={(e) => setListInput(e.target.value)}
+                                    placeholder="List name"
+                                    className="bg-slate-950 border border-slate-700 text-slate-200 rounded px-2 py-1.5 text-xs focus:outline-none focus:border-blue-500"
+                                />
+                                <button
+                                    onClick={handleBulkAddToList}
+                                    className="px-2.5 py-1.5 text-xs rounded border border-blue-600/60 text-blue-300 hover:bg-blue-900/20 transition-colors inline-flex items-center gap-1"
+                                >
+                                    <Plus size={12} />
+                                    Add List
+                                </button>
+                            </div>
+                            <button
+                                onClick={handleBulkDelete}
+                                className="px-3 py-1.5 text-xs rounded border border-red-700/50 text-red-300 hover:bg-red-900/20 transition-colors inline-flex items-center gap-1 ml-auto"
+                            >
+                                <Trash2 size={12} />
+                                Delete
+                            </button>
+                        </>
+                    )}
                 </div>
 
                 {/* Table */}
@@ -136,11 +309,12 @@ const ContactList: React.FC<ContactListProps> = ({ contacts, onSelectContact }) 
                     <table className="w-full text-left border-collapse">
                         <thead className="bg-slate-900 text-slate-400 text-xs uppercase tracking-wider sticky top-0 z-0 shadow-sm">
                             <tr>
+                                <th className="p-4 font-medium border-b border-slate-800 w-12"></th>
                                 <th className="p-4 font-medium border-b border-slate-800">Identity</th>
                                 <th className="p-4 font-medium border-b border-slate-800">Bridge Scores</th>
                                 <th className="p-4 font-medium border-b border-slate-800">Strategic Fit</th>
                                 <th className="p-4 font-medium border-b border-slate-800">Status</th>
-                                <th className="p-4 font-medium border-b border-slate-800"></th>
+                                <th className="p-4 font-medium border-b border-slate-800">Team</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-800">
@@ -150,6 +324,14 @@ const ContactList: React.FC<ContactListProps> = ({ contacts, onSelectContact }) 
                                     className="hover:bg-slate-800 transition-colors cursor-pointer group"
                                     onClick={() => onSelectContact(contact)}
                                 >
+                                    <td className="p-4" onClick={(e) => e.stopPropagation()}>
+                                        <input
+                                            type="checkbox"
+                                            checked={selectedIds.has(contact.id)}
+                                            onChange={() => toggleSelected(contact.id)}
+                                            className="accent-blue-500"
+                                        />
+                                    </td>
                                     <td className="p-4">
                                         <div className="flex items-start gap-3">
                                             <div className="w-8 h-8 rounded bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-400 text-xs font-bold shrink-0">
@@ -195,14 +377,49 @@ const ContactList: React.FC<ContactListProps> = ({ contacts, onSelectContact }) 
                                     <td className="p-4">
                                         <StatusBadge status={contact.status} />
                                     </td>
-                                    <td className="p-4 text-right">
-                                        <ChevronRight className="inline-block text-slate-700 group-hover:text-blue-400 transition-colors" size={18} />
+                                    <td className="p-4 text-right" onClick={(e) => e.stopPropagation()}>
+                                        <div className="flex items-center justify-end gap-1.5">
+                                            {contact.teamFlagged && (
+                                                <span className="text-[10px] uppercase tracking-wider text-amber-300 border border-amber-600/50 bg-amber-900/30 px-1.5 py-0.5 rounded">
+                                                    Flagged
+                                                </span>
+                                            )}
+                                            {(contact.lists || []).slice(0, 1).map(list => (
+                                                <span
+                                                    key={list}
+                                                    className="text-[10px] uppercase tracking-wider text-cyan-300 border border-cyan-700/50 bg-cyan-900/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1"
+                                                >
+                                                    <ListChecks size={10} />
+                                                    {list}
+                                                </span>
+                                            ))}
+                                            <button
+                                                type="button"
+                                                onClick={() => handleToggleSingleFlag(contact)}
+                                                className={`p-1 rounded border transition-colors ${contact.teamFlagged
+                                                        ? 'text-amber-300 border-amber-700/50 bg-amber-900/20'
+                                                        : 'text-slate-500 border-slate-700 hover:text-amber-300 hover:border-amber-700/50'
+                                                    }`}
+                                                title={contact.teamFlagged ? 'Unflag contact' : 'Flag contact'}
+                                            >
+                                                <Flag size={12} />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => handleDeleteSingle(contact)}
+                                                className="p-1 rounded border border-slate-700 text-slate-500 hover:text-red-300 hover:border-red-700/50 transition-colors"
+                                                title="Delete contact"
+                                            >
+                                                <Trash2 size={12} />
+                                            </button>
+                                            <ChevronRight className="inline-block text-slate-700 group-hover:text-blue-400 transition-colors" size={18} />
+                                        </div>
                                     </td>
                                 </tr>
                             ))}
                             {filteredContacts.length === 0 && (
                                 <tr>
-                                    <td colSpan={5} className="p-12 text-center">
+                                    <td colSpan={6} className="p-12 text-center">
                                         <div className="flex flex-col items-center justify-center text-slate-500">
                                             <Search size={32} className="mb-3 opacity-20" />
                                             <p className="text-sm">No contacts match your filters.</p>
@@ -302,7 +519,7 @@ const ContactList: React.FC<ContactListProps> = ({ contacts, onSelectContact }) 
                             </label>
 
                             <label className="flex items-center justify-between cursor-pointer group">
-                                <span className="text-sm text-slate-300 group-hover:text-white transition-colors">Has Risk Flags</span>
+                                <span className="text-sm text-slate-300 group-hover:text-white transition-colors">Has Team/Risk Flags</span>
                                 <div
                                     className={`w-10 h-5 rounded-full relative transition-colors ${filters.isFlagged ? 'bg-red-600' : 'bg-slate-700'}`}
                                     onClick={() => setFilters(prev => ({ ...prev, isFlagged: !prev.isFlagged }))}

@@ -124,6 +124,10 @@ export function mergeContactRecords(primary: Contact, duplicate: Contact): Conta
     ...(primary.tags || []),
     ...(duplicate.tags || []),
   ];
+  const combinedLists = [
+    ...(primary.lists || []),
+    ...(duplicate.lists || []),
+  ];
 
   const mergedRawText = (() => {
     const first = primary.rawText?.trim() ?? '';
@@ -140,6 +144,8 @@ export function mergeContactRecords(primary: Contact, duplicate: Contact): Conta
     location: bestString(primary.location, duplicate.location),
     source: bestString(primary.source, duplicate.source),
     tags: [...new Set(combinedTags.map((tag) => tag.trim()).filter(Boolean))],
+    lists: [...new Set(combinedLists.map((list) => list.trim()).filter(Boolean))],
+    teamFlagged: Boolean(primary.teamFlagged || duplicate.teamFlagged),
     rawText: mergedRawText,
     status: bestStatus(primary.status, duplicate.status),
     ingestionMeta: {

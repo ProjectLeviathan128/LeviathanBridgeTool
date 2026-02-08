@@ -1,5 +1,5 @@
 import { ThesisChunk } from '../types';
-import { saveKnowledgeDebounced, loadKnowledge } from './storageService';
+import { saveKnowledge, loadKnowledge } from './storageService';
 
 /**
  * Bridge Memory Service
@@ -21,7 +21,7 @@ class BridgeMemory {
   }
 
   private saveToStorage() {
-    saveKnowledgeDebounced(this.thesisStore);
+    saveKnowledge(this.thesisStore);
   }
 
   private chunkText(text: string, sourceName: string, type: 'thesis' | 'context'): ThesisChunk[] {

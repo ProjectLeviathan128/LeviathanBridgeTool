@@ -61,6 +61,8 @@ export interface Contact {
   location: string;
   source: string;
   tags?: string[];
+  lists?: string[]; // user-defined collaborative lists (e.g., "Q1 Targets")
+  teamFlagged?: boolean; // manual team flag for follow-up
   rawText?: string;
   status: 'New' | 'Enriched' | 'Review Needed' | 'Discarded';
 

@@ -1,21 +1,37 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Contact, ScoreProvenance, AppSettings } from '../types';
 import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from 'recharts';
 import { analyzeContactWithGemini } from '../services/geminiService';
 import { assessEnrichmentQuality } from '../services/enrichmentGuards';
 import { debugError, debugWarn, requestDebugPanelOpen } from '../services/debugService';
-import { AlertOctagon, Brain, X, Loader2, ShieldAlert, Fingerprint, History, Info, ExternalLink, RefreshCw } from 'lucide-react';
+import { AlertOctagon, Brain, X, Loader2, ShieldAlert, Fingerprint, History, Info, ExternalLink, RefreshCw, Flag, Trash2, Save } from 'lucide-react';
 
 interface ContactDetailProps {
   contact: Contact;
   onClose: () => void;
   onUpdate: (updatedContact: Contact) => void;
+  onDelete: (contactId: string) => void;
+  onToggleFlag: (contactId: string) => void;
+  onSetLists: (contactId: string, lists: string[]) => void;
   settings: AppSettings;
 }
 
-const ContactDetail: React.FC<ContactDetailProps> = ({ contact, onClose, onUpdate, settings }) => {
+const ContactDetail: React.FC<ContactDetailProps> = ({
+  contact,
+  onClose,
+  onUpdate,
+  onDelete,
+  onToggleFlag,
+  onSetLists,
+  settings
+}) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [listDraft, setListDraft] = useState('');
+
+  useEffect(() => {
+    setListDraft((contact.lists || []).join(', '));
+  }, [contact.id, contact.lists]);
 
   const handleEnrich = async () => {
     setIsAnalyzing(true);
@@ -53,6 +69,20 @@ const ContactDetail: React.FC<ContactDetailProps> = ({ contact, onClose, onUpdat
     } finally {
       setIsAnalyzing(false);
     }
+  };
+
+  const handleSaveLists = () => {
+    const lists = listDraft
+      .split(',')
+      .map(list => list.trim())
+      .filter(Boolean);
+    onSetLists(contact.id, lists);
+  };
+
+  const handleDelete = () => {
+    if (!window.confirm(`Delete ${contact.name}? This cannot be undone.`)) return;
+    onDelete(contact.id);
+    onClose();
   };
 
   const radarData = contact.scores ? [
@@ -125,6 +155,43 @@ const ContactDetail: React.FC<ContactDetailProps> = ({ contact, onClose, onUpdat
                 }`}>
                 {contact.status}
               </span>
+              {contact.teamFlagged && (
+                <span className="text-xs px-2 py-1 rounded border bg-amber-900/30 text-amber-300 border-amber-700/50 uppercase tracking-wider">
+                  Team Flagged
+                </span>
+              )}
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {(contact.lists || []).map(list => (
+                <span
+                  key={list}
+                  className="text-[10px] px-2 py-1 rounded border bg-cyan-900/20 text-cyan-300 border-cyan-700/50 uppercase tracking-wider"
+                >
+                  {list}
+                </span>
+              ))}
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                onClick={() => onToggleFlag(contact.id)}
+                className={`px-3 py-1.5 text-xs rounded border transition-colors inline-flex items-center gap-1.5 ${
+                  contact.teamFlagged
+                    ? 'text-amber-300 border-amber-700/60 bg-amber-900/20 hover:bg-amber-900/30'
+                    : 'text-slate-300 border-slate-700 hover:border-amber-700/60 hover:text-amber-300'
+                }`}
+              >
+                <Flag size={12} />
+                {contact.teamFlagged ? 'Unflag' : 'Flag for Team'}
+              </button>
+              <button
+                onClick={handleDelete}
+                className="px-3 py-1.5 text-xs rounded border border-red-800/60 text-red-300 hover:bg-red-900/20 transition-colors inline-flex items-center gap-1.5"
+              >
+                <Trash2 size={12} />
+                Delete Contact
+              </button>
             </div>
           </div>
           <button onClick={onClose} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 transition-colors">
@@ -288,6 +355,36 @@ const ContactDetail: React.FC<ContactDetailProps> = ({ contact, onClose, onUpdat
 
             {/* Right Column: Strategic Outcomes */}
             <div className="space-y-6">
+              <div className="bg-slate-800 rounded-lg p-5 border border-slate-700">
+                <h4 className="text-white font-semibold mb-3 flex items-center gap-2">
+                  <Flag className="text-amber-400" size={16} />
+                  Team Collaboration
+                </h4>
+                <p className="text-xs text-slate-400 mb-3">
+                  Use shared flags and lists so your cofounder sees priority changes immediately.
+                </p>
+                <div className="space-y-2">
+                  <label className="text-[11px] uppercase tracking-wider text-slate-500">Lists (comma separated)</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={listDraft}
+                      onChange={(e) => setListDraft(e.target.value)}
+                      placeholder="e.g. q1-targets, warm-intros"
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSaveLists}
+                      className="px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium inline-flex items-center gap-1"
+                    >
+                      <Save size={12} />
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               {contact.enrichment ? (
                 <>
                   <div className="bg-slate-800 rounded-lg p-5 border border-slate-700">
