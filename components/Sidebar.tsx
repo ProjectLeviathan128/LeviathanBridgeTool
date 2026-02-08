@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, Users, Upload, FileText, Settings, Anchor, Bot } from 'lucide-react';
+import { LayoutDashboard, Users, Upload, FileText, Settings, Anchor, Bot, Building2 } from 'lucide-react';
 import { bridgeMemory } from '../services/bridgeMemory';
 
 interface SidebarProps {
@@ -12,6 +12,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeTab, onTabChange }) => {
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'contacts', label: 'Universe', icon: Users },
     { id: 'chat', label: 'Assistant', icon: Bot },
+    { id: 'organization', label: 'Organization', icon: Building2 },
     { id: 'upload', label: 'Ingestion', icon: Upload },
     { id: 'thesis', label: 'Thesis & Rules', icon: FileText },
     { id: 'settings', label: 'Settings', icon: Settings },

@@ -141,8 +141,55 @@ export interface SyncState {
 export interface Organization {
   id: string;
   name: string;
+  thesis: string;
+  strategicContext: string;
   ownerId: string;
-  memberIds: string[];
+  members: OrganizationMember[];
   inviteCode: string;
   createdAt: number;
+  updatedAt: number;
+}
+
+export interface OrganizationMember {
+  userId: string;
+  username: string;
+  email?: string;
+  role: 'owner' | 'member';
+  joinedAt: string;
+}
+
+export interface OrganizationInvitePayload {
+  v: 1;
+  org: {
+    id: string;
+    name: string;
+    thesis: string;
+    strategicContext: string;
+    ownerId: string;
+    createdAt: number;
+    updatedAt: number;
+  };
+  inviter: {
+    userId: string;
+    username: string;
+    email?: string;
+  };
+  issuedAt: number;
+  expiresAt: number;
+  nonce: string;
+}
+
+export interface ContactMergeResult {
+  contacts: Contact[];
+  added: number;
+  duplicates: number;
+  merged: number;
+}
+
+export interface OrganizationSyncPackage {
+  version: 1;
+  exportedAt: string;
+  exportedBy: string;
+  organization: Organization;
+  contacts: Contact[];
 }

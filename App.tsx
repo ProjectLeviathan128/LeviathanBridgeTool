@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import ContactList from './components/ContactList';
@@ -7,16 +7,30 @@ import UploadZone from './components/UploadZone';
 import ChatInterface from './components/ChatInterface';
 import Settings from './components/Settings';
 import DebugPanel from './components/DebugPanel';
-import { Contact, AppSettings, IngestionHistoryItem, ChatThread, SyncState } from './types';
+import OrganizationHub from './components/OrganizationHub';
+import { Contact, AppSettings, IngestionHistoryItem, ChatThread, SyncState, Organization, OrganizationMember } from './types';
 import { bridgeMemory } from './services/bridgeMemory';
 import {
   loadContacts, saveContactsDebounced,
   loadThreads, saveThreadsDebounced,
   loadSettings, saveSettings,
+  loadKnowledge,
   loadFromCloud, saveToCloudDebounced, saveToCloud,
-  setCurrentUser, clearCurrentUserData, loadSyncState, saveSyncState
+  setCurrentUser, clearCurrentUserData, loadSyncState, saveSyncState,
+  loadOrganization, saveOrganizationDebounced
 } from './services/storageService';
 import { debugError, debugInfo, debugWarn } from './services/debugService';
+import {
+  createOrganization,
+  createOrganizationInviteCode,
+  createOrganizationSyncPackage,
+  dedupeContacts,
+  mergeContactsWithDedupe,
+  organizationFromInvite,
+  parseOrganizationInviteCode,
+  parseOrganizationSyncPackage,
+  upsertOrganizationMember
+} from './services/organizationService';
 import { LogIn, LogOut, User, Cloud, CloudOff, RefreshCw, AlertCircle } from 'lucide-react';
 
 // Puter.js global declaration
@@ -39,6 +53,26 @@ function stringifyConsoleArg(value: unknown): string {
   }
 }
 
+type AuthUser = { username: string; email?: string; uuid?: string };
+
+function toOrganizationMember(user: AuthUser, role: 'owner' | 'member' = 'member'): OrganizationMember {
+  return {
+    userId: user.uuid || user.username,
+    username: user.username,
+    email: user.email,
+    role,
+    joinedAt: new Date().toISOString(),
+  };
+}
+
+function orgThesisSource(orgId: string): string {
+  return `org:${orgId}:thesis`;
+}
+
+function orgContextSource(orgId: string): string {
+  return `org:${orgId}:context`;
+}
+
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -59,12 +93,17 @@ const App: React.FC = () => {
   });
 
   // Auth state
-  const [user, setUser] = useState<{ username: string; email?: string; uuid?: string } | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
 
   // Sync state
   const [syncState, setSyncState] = useState<SyncState>({ status: 'idle', lastSyncedAt: null });
   const [isSynced, setIsSynced] = useState(false);
+
+  // Organization
+  const [organization, setOrganization] = useState<Organization | null>(null);
+  const [orgMessage, setOrgMessage] = useState<string | null>(null);
+  const orgContextIdRef = useRef<string | null>(null);
 
   // Logout confirmation modal
   const [showLogoutModal, setShowLogoutModal] = useState(false);
@@ -108,23 +147,50 @@ const App: React.FC = () => {
     };
   }, []);
 
+  const syncOrganizationContext = useCallback((nextOrg: Organization | null) => {
+    const previousOrgId = orgContextIdRef.current;
+    if (previousOrgId && (!nextOrg || nextOrg.id !== previousOrgId)) {
+      bridgeMemory.replaceSourceDocument('', orgThesisSource(previousOrgId), 'thesis');
+      bridgeMemory.replaceSourceDocument('', orgContextSource(previousOrgId), 'context');
+    }
+
+    if (nextOrg) {
+      bridgeMemory.replaceSourceDocument(nextOrg.thesis, orgThesisSource(nextOrg.id), 'thesis');
+      bridgeMemory.replaceSourceDocument(nextOrg.strategicContext, orgContextSource(nextOrg.id), 'context');
+      orgContextIdRef.current = nextOrg.id;
+    } else {
+      orgContextIdRef.current = null;
+    }
+
+    setThesisVersion(v => v + 1);
+  }, []);
+
   // Load user data for a specific user
   const loadUserData = useCallback(() => {
     const loadedContacts = loadContacts();
     const loadedThreads = loadThreads();
     const loadedSettings = loadSettings();
     const loadedSyncState = loadSyncState();
+    const loadedKnowledge = loadKnowledge();
+    const loadedOrganization = loadOrganization();
 
     setContacts(loadedContacts);
     setThreads(loadedThreads);
     setActiveThreadId(loadedThreads.length > 0 ? loadedThreads[0].id : 'default');
     setSettings(loadedSettings);
     setSyncState(loadedSyncState);
+    setOrganization(loadedOrganization);
+
+    bridgeMemory.initialize(loadedKnowledge);
+    syncOrganizationContext(loadedOrganization);
+
     debugInfo('storage', 'Loaded local user data.', {
       contacts: loadedContacts.length,
-      threads: loadedThreads.length
+      threads: loadedThreads.length,
+      knowledgeChunks: loadedKnowledge.length,
+      organization: loadedOrganization?.id || null
     });
-  }, []);
+  }, [syncOrganizationContext]);
 
   // Clear UI state (for logout with clear)
   const clearUIState = useCallback(() => {
@@ -144,7 +210,10 @@ const App: React.FC = () => {
     setActiveThreadId('default');
     setSettings({ focusMode: 'BALANCED', analysisModel: 'quality' });
     setSyncState({ status: 'idle', lastSyncedAt: null });
+    setOrganization(null);
+    setOrgMessage(null);
     bridgeMemory.clear();
+    orgContextIdRef.current = null;
     setThesisVersion(v => v + 1);
     debugWarn('app', 'Cleared UI state.');
   }, []);
@@ -172,7 +241,14 @@ const App: React.FC = () => {
               setActiveThreadId(cloudData.threads[0]?.id || 'default');
             }
             if (cloudData.settings) setSettings(cloudData.settings);
-            if (cloudData.knowledge) setThesisVersion(v => v + 1);
+            if (cloudData.knowledge) {
+              bridgeMemory.initialize(cloudData.knowledge);
+              setThesisVersion(v => v + 1);
+            }
+            if (cloudData.organization) {
+              setOrganization(cloudData.organization);
+              syncOrganizationContext(cloudData.organization);
+            }
             setSyncState({ status: 'synced', lastSyncedAt: Date.now() });
             debugInfo('auth', 'Signed-in session restored from Puter.', {
               username: userData.username
@@ -193,7 +269,7 @@ const App: React.FC = () => {
       }
     };
     checkAuth();
-  }, [loadUserData]);
+  }, [loadUserData, syncOrganizationContext]);
 
   // Persist contacts when they change (Local + Cloud)
   useEffect(() => {
@@ -215,6 +291,23 @@ const App: React.FC = () => {
     saveSettings(settings);
     if (user) saveToCloudDebounced();
   }, [settings, isSynced, user]);
+
+  // Persist organization when it changes (Local + Cloud)
+  useEffect(() => {
+    if (!isSynced) return;
+    saveOrganizationDebounced(organization);
+    if (user) saveToCloudDebounced();
+  }, [organization, isSynced, user]);
+
+  useEffect(() => {
+    if (!user || !organization) return;
+
+    const userId = user.uuid || user.username;
+    if (organization.members.some(member => member.userId === userId)) return;
+
+    const role: 'owner' | 'member' = organization.ownerId === userId ? 'owner' : 'member';
+    setOrganization(prev => (prev ? upsertOrganizationMember(prev, toOrganizationMember(user, role)) : prev));
+  }, [user, organization]);
 
   // Force sync to cloud
   const handleForceSync = async () => {
@@ -240,6 +333,7 @@ const App: React.FC = () => {
       if (userData) {
         setCurrentUser(userData.uuid || userData.username);
         setUser(userData);
+        loadUserData();
 
         // Load data from cloud on fresh sign-in
         setSyncState({ status: 'syncing', lastSyncedAt: null });
@@ -250,7 +344,14 @@ const App: React.FC = () => {
           setActiveThreadId(cloudData.threads[0]?.id || 'default');
         }
         if (cloudData.settings) setSettings(cloudData.settings);
-        if (cloudData.knowledge) setThesisVersion(v => v + 1);
+        if (cloudData.knowledge) {
+          bridgeMemory.initialize(cloudData.knowledge);
+          setThesisVersion(v => v + 1);
+        }
+        if (cloudData.organization) {
+          setOrganization(cloudData.organization);
+          syncOrganizationContext(cloudData.organization);
+        }
         setSyncState({ status: 'synced', lastSyncedAt: Date.now() });
         debugInfo('auth', 'Sign-in completed.', { username: userData.username });
       }
@@ -278,6 +379,7 @@ const App: React.FC = () => {
       // Reset to anonymous state
       setCurrentUser(null);
       setUser(null);
+      setOrgMessage(null);
       setSyncState({ status: 'idle', lastSyncedAt: null });
       saveSyncState({ status: 'idle', lastSyncedAt: null });
 
@@ -311,9 +413,20 @@ const App: React.FC = () => {
   };
 
   const handleIngestContacts = (newContacts: Contact[]) => {
-    setContacts(prev => [...prev, ...newContacts]);
+    const mergeResult = mergeContactsWithDedupe(contacts, newContacts);
+    setContacts(mergeResult.contacts);
     setActiveTab('contacts'); // Auto-switch to list view
-    debugInfo('ingestion', 'Contacts ingested into universe.', { count: newContacts.length });
+    if (mergeResult.duplicates > 0) {
+      setOrgMessage(
+        `Ingestion dedupe: ${mergeResult.added} new contacts, ${mergeResult.duplicates} duplicates merged.`
+      );
+    }
+    debugInfo('ingestion', 'Contacts ingested into universe.', {
+      imported: newContacts.length,
+      added: mergeResult.added,
+      duplicates: mergeResult.duplicates,
+      merged: mergeResult.merged
+    });
   };
 
   const handleThesisUpdate = () => {
@@ -368,8 +481,173 @@ const App: React.FC = () => {
 
   const handleClearKnowledge = () => {
     bridgeMemory.clear();
+    orgContextIdRef.current = null;
     setThesisVersion(prev => prev + 1);
     debugWarn('knowledge', 'Knowledge base cleared.');
+  };
+
+  const handleCreateOrganization = (payload: { name: string; thesis: string; strategicContext: string }) => {
+    if (!user) {
+      setOrgMessage('Sign in first to create an organization.');
+      return;
+    }
+
+    const name = payload.name.trim();
+    if (!name) {
+      setOrgMessage('Organization name is required.');
+      return;
+    }
+
+    const ownerMember = toOrganizationMember(user, 'owner');
+    const nextOrg = createOrganization({
+      name,
+      thesis: payload.thesis,
+      strategicContext: payload.strategicContext,
+      owner: ownerMember
+    });
+
+    setOrganization(nextOrg);
+    syncOrganizationContext(nextOrg);
+    setOrgMessage(`Created organization "${nextOrg.name}".`);
+    debugInfo('organization', 'Organization created.', {
+      id: nextOrg.id,
+      name: nextOrg.name
+    });
+  };
+
+  const handleJoinOrganization = (inviteCode: string) => {
+    if (!user) {
+      setOrgMessage('Sign in first to join an organization.');
+      return;
+    }
+
+    const parsed = parseOrganizationInviteCode(inviteCode);
+    if (!parsed.ok || !parsed.payload) {
+      setOrgMessage(parsed.error || 'Invite code is invalid.');
+      return;
+    }
+
+    const joiningMember = toOrganizationMember(user, 'member');
+
+    const nextOrg = organizationFromInvite(parsed.payload, joiningMember);
+    setOrganization(nextOrg);
+    syncOrganizationContext(nextOrg);
+    setOrgMessage(`Joined organization "${nextOrg.name}".`);
+    debugInfo('organization', 'Organization joined via invite.', {
+      id: nextOrg.id,
+      member: joiningMember.userId
+    });
+  };
+
+  const handleUpdateOrganization = (payload: { name: string; thesis: string; strategicContext: string }) => {
+    if (!organization) return;
+
+    const nextOrg: Organization = {
+      ...organization,
+      name: payload.name.trim() || organization.name,
+      thesis: payload.thesis,
+      strategicContext: payload.strategicContext,
+      updatedAt: Date.now()
+    };
+
+    setOrganization(nextOrg);
+    syncOrganizationContext(nextOrg);
+    setOrgMessage('Organization context updated.');
+    debugInfo('organization', 'Organization context updated.', { id: nextOrg.id });
+  };
+
+  const handleGenerateOrganizationInvite = () => {
+    if (!organization || !user) return;
+
+    const role: 'owner' | 'member' = organization.ownerId === (user.uuid || user.username) ? 'owner' : 'member';
+    const inviter = toOrganizationMember(user, role);
+    const nextOrg: Organization = {
+      ...organization,
+      inviteCode: createOrganizationInviteCode(organization, inviter),
+      updatedAt: Date.now()
+    };
+
+    setOrganization(nextOrg);
+    setOrgMessage('Generated a fresh invite code.');
+    debugInfo('organization', 'Invite regenerated.', {
+      id: nextOrg.id,
+      inviter: inviter.userId
+    });
+  };
+
+  const handleDedupeContacts = () => {
+    const result = dedupeContacts(contacts);
+    setContacts(result.contacts);
+    setSelectedContact(prev => (prev ? result.contacts.find(c => c.id === prev.id) || null : null));
+    setOrgMessage(`Dedup complete: ${result.duplicates} duplicates merged, ${result.contacts.length} canonical contacts.`);
+    debugInfo('organization', 'Deduplication completed.', result);
+  };
+
+  const handleExportOrganizationPackage = () => {
+    if (!organization || !user) {
+      setOrgMessage('Create or join an organization before exporting.');
+      return;
+    }
+
+    const pkg = createOrganizationSyncPackage({
+      organization,
+      contacts,
+      exportedBy: user.username
+    });
+
+    const blob = new Blob([JSON.stringify(pkg, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${organization.name.replace(/\s+/g, '-').toLowerCase()}-org-package.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    setOrgMessage(`Exported organization package with ${contacts.length} contacts.`);
+    debugInfo('organization', 'Organization package exported.', {
+      id: organization.id,
+      contacts: contacts.length
+    });
+  };
+
+  const handleImportOrganizationPackage = async (file: File) => {
+    try {
+      const raw = await file.text();
+      const parsed = parseOrganizationSyncPackage(raw);
+      if (!parsed.ok || !parsed.payload) {
+        setOrgMessage(parsed.error || 'Invalid organization package.');
+        return;
+      }
+
+      const incoming = parsed.payload;
+      let nextOrganization = incoming.organization;
+
+      if (user) {
+        const role: 'owner' | 'member' =
+          incoming.organization.ownerId === (user.uuid || user.username) ? 'owner' : 'member';
+        nextOrganization = upsertOrganizationMember(incoming.organization, toOrganizationMember(user, role));
+      }
+
+      const mergeResult = mergeContactsWithDedupe(contacts, incoming.contacts);
+      setContacts(mergeResult.contacts);
+      setSelectedContact(prev => (prev ? mergeResult.contacts.find(c => c.id === prev.id) || null : null));
+      setOrganization(nextOrganization);
+      syncOrganizationContext(nextOrganization);
+
+      setOrgMessage(
+        `Imported package from ${incoming.exportedBy}. Added ${mergeResult.added}, merged ${mergeResult.duplicates} duplicates.`
+      );
+      debugInfo('organization', 'Organization package imported.', {
+        id: nextOrganization.id,
+        added: mergeResult.added,
+        duplicates: mergeResult.duplicates
+      });
+    } catch (e) {
+      setOrgMessage('Failed to import organization package.');
+      debugError('organization', 'Organization package import failed.', e);
+    }
   };
 
   // Chat Management Methods
@@ -446,6 +724,22 @@ const App: React.FC = () => {
             onUpdateSettings={setSettings}
             onClearContacts={handleClearContacts}
             onClearKnowledge={handleClearKnowledge}
+          />
+        );
+      case 'organization':
+        return (
+          <OrganizationHub
+            user={user}
+            organization={organization}
+            contactsCount={contacts.length}
+            orgMessage={orgMessage}
+            onCreateOrganization={handleCreateOrganization}
+            onJoinOrganization={handleJoinOrganization}
+            onUpdateOrganization={handleUpdateOrganization}
+            onGenerateInvite={handleGenerateOrganizationInvite}
+            onDedupeContacts={handleDedupeContacts}
+            onExportPackage={handleExportOrganizationPackage}
+            onImportPackage={handleImportOrganizationPackage}
           />
         );
       case 'thesis':
@@ -543,6 +837,11 @@ const App: React.FC = () => {
                 <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 rounded-full border border-slate-700">
                   <User size={14} className="text-emerald-400" />
                   <span className="text-xs text-slate-300">{user.username}</span>
+                  {organization && (
+                    <span className="text-[10px] text-blue-300 border-l border-slate-600 pl-2">
+                      {organization.name}
+                    </span>
+                  )}
                 </div>
                 <button
                   onClick={() => setShowLogoutModal(true)}

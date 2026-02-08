@@ -13,6 +13,7 @@ const BASE_KEYS = {
     KNOWLEDGE: 'knowledge',
     THREADS: 'threads',
     SETTINGS: 'settings',
+    ORGANIZATION: 'organization',
 } as const;
 
 // Get the actual storage key (prefixed if user is logged in)
@@ -58,7 +59,7 @@ function safeJsonParse<T>(json: string | null, fallback: T): T {
 // =====================
 // CONTACTS
 // =====================
-import { Contact, AppSettings, ChatThread, ThesisChunk, SyncState } from '../types';
+import { Contact, AppSettings, ChatThread, ThesisChunk, SyncState, Organization } from '../types';
 
 export function saveContacts(contacts: Contact[]): void {
     try {
@@ -145,6 +146,27 @@ export function loadSettings(): AppSettings {
 }
 
 // =====================
+// ORGANIZATION
+// =====================
+export function saveOrganization(organization: Organization | null): void {
+    try {
+        if (!organization) {
+            localStorage.removeItem(getStorageKey(BASE_KEYS.ORGANIZATION));
+            return;
+        }
+        localStorage.setItem(getStorageKey(BASE_KEYS.ORGANIZATION), JSON.stringify(organization));
+    } catch (e) {
+        console.error('Failed to save organization:', e);
+    }
+}
+
+export const saveOrganizationDebounced = debounce(saveOrganization, 500);
+
+export function loadOrganization(): Organization | null {
+    return safeJsonParse(localStorage.getItem(getStorageKey(BASE_KEYS.ORGANIZATION)), null);
+}
+
+// =====================
 // SYNC STATE
 // =====================
 const SYNC_STATE_KEY = 'bridge_sync_state';
@@ -201,6 +223,7 @@ export function exportAllData(): string {
         knowledge: loadKnowledge(),
         threads: loadThreads(),
         settings: loadSettings(),
+        organization: loadOrganization(),
         exportedAt: new Date().toISOString(),
     };
     return JSON.stringify(data, null, 2);
@@ -213,6 +236,7 @@ export function importAllData(jsonString: string): boolean {
         if (data.knowledge) saveKnowledge(data.knowledge);
         if (data.threads) saveThreads(data.threads);
         if (data.settings) saveSettings(data.settings);
+        if ('organization' in data) saveOrganization(data.organization || null);
         return true;
     } catch (e) {
         console.error('Failed to import data:', e);
@@ -259,6 +283,7 @@ export async function saveToCloud(): Promise<SyncState> {
             knowledge: loadKnowledge(),
             threads: loadThreads(),
             settings: loadSettings(),
+            organization: loadOrganization(),
             lastUpdated: new Date().toISOString()
         };
 
@@ -284,9 +309,10 @@ export async function loadFromCloud(): Promise<{
     knowledge: ThesisChunk[] | null;
     threads: ChatThread[] | null;
     settings: AppSettings | null;
+    organization: Organization | null;
 }> {
     if (typeof puter === 'undefined' || !puter.auth.isSignedIn()) {
-        return { contacts: null, knowledge: null, threads: null, settings: null };
+        return { contacts: null, knowledge: null, threads: null, settings: null, organization: null };
     }
 
     try {
@@ -298,10 +324,10 @@ export async function loadFromCloud(): Promise<{
             content = await file.text();
         } catch (err) {
             console.warn('No cloud backup found or read error:', err);
-            return { contacts: null, knowledge: null, threads: null, settings: null };
+            return { contacts: null, knowledge: null, threads: null, settings: null, organization: null };
         }
 
-        if (!content) return { contacts: null, knowledge: null, threads: null, settings: null };
+        if (!content) return { contacts: null, knowledge: null, threads: null, settings: null, organization: null };
 
         const data = JSON.parse(content);
 
@@ -310,6 +336,7 @@ export async function loadFromCloud(): Promise<{
         if (data.knowledge) saveKnowledge(data.knowledge);
         if (data.threads) saveThreads(data.threads);
         if (data.settings) saveSettings(data.settings);
+        if ('organization' in data) saveOrganization(data.organization || null);
 
         // Update sync state
         saveSyncState({ status: 'synced', lastSyncedAt: Date.now() });
@@ -320,11 +347,12 @@ export async function loadFromCloud(): Promise<{
             contacts: data.contacts,
             knowledge: data.knowledge,
             threads: data.threads,
-            settings: data.settings
+            settings: data.settings,
+            organization: data.organization || null
         };
 
     } catch (e) {
         console.error('Cloud load failed:', e);
-        return { contacts: null, knowledge: null, threads: null, settings: null };
+        return { contacts: null, knowledge: null, threads: null, settings: null, organization: null };
     }
 }

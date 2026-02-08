@@ -24,11 +24,11 @@ class BridgeMemory {
     saveKnowledgeDebounced(this.thesisStore);
   }
 
-  public ingestThesisDocument(text: string, sourceName: string, type: 'thesis' | 'context'): ThesisChunk[] {
+  private chunkText(text: string, sourceName: string, type: 'thesis' | 'context'): ThesisChunk[] {
     // Semantic Chunking Simulation: Split by double newlines to keep paragraphs intact
     const rawChunks = text.split(/\n\s*\n/);
 
-    const newChunks: ThesisChunk[] = rawChunks
+    return rawChunks
       .filter(c => c.trim().length > 10)
       .map((content, idx) => ({
         id: `chunk-${Date.now()}-${idx}`,
@@ -37,7 +37,27 @@ class BridgeMemory {
         version: new Date().toISOString(),
         tags: [type] // Tag explicitly
       }));
+  }
 
+  public ingestThesisDocument(text: string, sourceName: string, type: 'thesis' | 'context'): ThesisChunk[] {
+    const newChunks = this.chunkText(text, sourceName, type);
+
+    this.thesisStore.push(...newChunks);
+    this.saveToStorage();
+    return newChunks;
+  }
+
+  public replaceSourceDocument(text: string, sourceName: string, type: 'thesis' | 'context'): ThesisChunk[] {
+    this.thesisStore = this.thesisStore.filter(
+      chunk => !(chunk.source === sourceName && chunk.tags.includes(type))
+    );
+
+    if (!text.trim()) {
+      this.saveToStorage();
+      return [];
+    }
+
+    const newChunks = this.chunkText(text, sourceName, type);
     this.thesisStore.push(...newChunks);
     this.saveToStorage();
     return newChunks;
