@@ -7,6 +7,7 @@ import { Send, Bot, User, Search, Loader2, ExternalLink, Zap, Plus, Trash2, Refr
 import EnrichmentModal, { EnrichmentProgress, EnrichmentStep } from './EnrichmentModal';
 
 interface ChatInterfaceProps {
+    isVisible: boolean;
     contacts: Contact[];
     onBatchUpdateContacts: (contacts: Contact[]) => void;
     settings: AppSettings;
@@ -17,6 +18,7 @@ interface ChatInterfaceProps {
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({
+    isVisible,
     contacts,
     onBatchUpdateContacts,
     settings,
@@ -55,14 +57,20 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     const showGroundingSources = settings.chat.showGroundingSources;
 
     useEffect(() => {
+        if (!isVisible) return;
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [activeThread?.messages, activeThread?.status]);
+    }, [isVisible, activeThread?.messages, activeThread?.status]);
 
     useEffect(() => {
+        if (!isVisible) return;
         chatSessions.current.forEach((chat) => {
             chat.setContacts(contacts);
         });
-    }, [contacts]);
+    }, [contacts, isVisible]);
+
+    if (!isVisible) {
+        return <div className="hidden" aria-hidden="true" />;
+    }
 
     // Guard: If no threads exist yet (initial load), show loading state
     if (!activeThread) {
@@ -513,15 +521,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             handleSend();
         }
     };
-
-    // Safety: If no threads exist yet (initial load), show loading state
-    if (!activeThread) {
-        return (
-            <div className="flex h-full items-center justify-center bg-slate-900 rounded-lg border border-slate-800">
-                <div className="text-slate-500 text-sm">Loading chat...</div>
-            </div>
-        );
-    }
 
     return (<>
         <div className="flex h-full bg-slate-900 rounded-lg overflow-hidden border border-slate-800">

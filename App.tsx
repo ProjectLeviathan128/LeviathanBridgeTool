@@ -1,13 +1,5 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, Suspense } from 'react';
 import Sidebar from './components/Sidebar';
-import Dashboard from './components/Dashboard';
-import ContactList from './components/ContactList';
-import ContactDetail from './components/ContactDetail';
-import UploadZone from './components/UploadZone';
-import ChatInterface from './components/ChatInterface';
-import Settings from './components/Settings';
-import DebugPanel from './components/DebugPanel';
-import OrganizationHub from './components/OrganizationHub';
 import { Contact, AppSettings, IngestionHistoryItem, ChatThread, SyncState, Organization, OrganizationMember, OrganizationWorkspacePackage } from './types';
 import { bridgeMemory } from './services/bridgeMemory';
 import {
@@ -38,8 +30,19 @@ import {
   parseOrganizationSyncPackage,
   upsertOrganizationMember
 } from './services/organizationService';
-import { extractTextFromKnowledgeFile } from './services/documentService';
 import { LogIn, LogOut, User, Cloud, CloudOff, RefreshCw, AlertCircle } from 'lucide-react';
+
+const Dashboard = React.lazy(() => import('./components/Dashboard'));
+const ContactList = React.lazy(() => import('./components/ContactList'));
+const ContactDetail = React.lazy(() => import('./components/ContactDetail'));
+const UploadZone = React.lazy(() => import('./components/UploadZone'));
+const ChatInterface = React.lazy(() => import('./components/ChatInterface'));
+const Settings = React.lazy(() => import('./components/Settings'));
+const DebugPanel = React.lazy(() => import('./components/DebugPanel'));
+const OrganizationHub = React.lazy(() => import('./components/OrganizationHub'));
+
+const ORG_REFRESH_INTERVAL_MS = 30000;
+const ORG_REFRESH_MIN_GAP_MS = 8000;
 
 // Puter.js global declaration
 declare const puter: {
@@ -217,6 +220,7 @@ const App: React.FC = () => {
   // Chat State (Lifted)
   const [threads, setThreads] = useState<ChatThread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string>('default');
+  const [chatMounted, setChatMounted] = useState(false);
 
   // Track thesis version to force re-render of Thesis tab when memory updates
   const [thesisVersion, setThesisVersion] = useState(0);
@@ -238,9 +242,34 @@ const App: React.FC = () => {
   const orgContextIdRef = useRef<string | null>(null);
   const orgWorkspaceLoadedRef = useRef<string | null>(null);
   const orgRefreshInFlightRef = useRef(false);
+  const contactsRef = useRef<Contact[]>([]);
+  const ingestionHistoryRef = useRef<IngestionHistoryItem[]>([]);
+  const organizationRef = useRef<Organization | null>(null);
+  const userRef = useRef<AuthUser | null>(null);
+  const lastOrgRefreshAtRef = useRef(0);
 
   // Logout confirmation modal
   const [showLogoutModal, setShowLogoutModal] = useState(false);
+
+  useEffect(() => {
+    contactsRef.current = contacts;
+  }, [contacts]);
+
+  useEffect(() => {
+    ingestionHistoryRef.current = ingestionHistory;
+  }, [ingestionHistory]);
+
+  useEffect(() => {
+    organizationRef.current = organization;
+  }, [organization]);
+
+  useEffect(() => {
+    userRef.current = user;
+  }, [user]);
+
+  useEffect(() => {
+    if (activeTab === 'chat') setChatMounted(true);
+  }, [activeTab]);
 
   const buildWorkspacePayload = useCallback((orgValue: Organization): OrganizationWorkspacePackage => ({
     version: 1,
@@ -261,9 +290,7 @@ const App: React.FC = () => {
       error: console.error.bind(console),
     };
 
-    const bindings: Array<{ method: 'log' | 'info' | 'warn' | 'error'; logger: typeof debugInfo }> = [
-      { method: 'log', logger: debugInfo },
-      { method: 'info', logger: debugInfo },
+    const bindings: Array<{ method: 'warn' | 'error'; logger: typeof debugWarn }> = [
       { method: 'warn', logger: debugWarn },
       { method: 'error', logger: debugError },
     ];
@@ -554,31 +581,41 @@ const App: React.FC = () => {
     };
   }, [isSynced, user, organization?.id]);
 
-  const refreshOrganizationWorkspaceFromCloud = useCallback(async () => {
-    if (!isSynced || !user || !organization) return;
-    if (orgWorkspaceLoadedRef.current !== organization.id) return;
+  const refreshOrganizationWorkspaceFromCloud = useCallback(async (force = false) => {
+    const currentUser = userRef.current;
+    const currentOrganization = organizationRef.current;
+    if (!isSynced || !currentUser || !currentOrganization) return;
+    if (orgWorkspaceLoadedRef.current !== currentOrganization.id) return;
     if (orgRefreshInFlightRef.current) return;
+
+    const now = Date.now();
+    if (!force && now - lastOrgRefreshAtRef.current < ORG_REFRESH_MIN_GAP_MS) return;
+    lastOrgRefreshAtRef.current = now;
 
     orgRefreshInFlightRef.current = true;
     try {
-      const role: 'owner' | 'member' = organization.ownerId === (user.uuid || user.username) ? 'owner' : 'member';
-      const currentUserMember = toOrganizationMember(user, role);
-      const remote = await loadOrganizationWorkspaceFromCloud(organization.id);
+      const role: 'owner' | 'member' =
+        currentOrganization.ownerId === (currentUser.uuid || currentUser.username) ? 'owner' : 'member';
+      const currentUserMember = toOrganizationMember(currentUser, role);
+      const remote = await loadOrganizationWorkspaceFromCloud(currentOrganization.id);
       if (!remote) return;
 
+      const localContacts = contactsRef.current;
+      const localHistory = ingestionHistoryRef.current;
       const localKnowledge = bridgeMemory.getAllChunks();
       const mergedOrganization = upsertOrganizationMember(
-        mergeOrganizationRecords(organization, remote.organization),
+        mergeOrganizationRecords(currentOrganization, remote.organization),
         currentUserMember
       );
-      const contactMerge = mergeContactsWithDedupe(contacts, remote.contacts);
+      const contactMerge = mergeContactsWithDedupe(localContacts, remote.contacts);
       const mergedKnowledge = mergeKnowledgeChunks(localKnowledge, remote.knowledge);
-      const mergedHistory = mergeIngestionHistoryItems(ingestionHistory, remote.ingestionHistory);
+      const mergedHistory = mergeIngestionHistoryItems(localHistory, remote.ingestionHistory);
 
-      const organizationChanged = organizationSnapshotKey(mergedOrganization) !== organizationSnapshotKey(organization);
+      const organizationChanged =
+        organizationSnapshotKey(mergedOrganization) !== organizationSnapshotKey(currentOrganization);
       const contactsChanged = contactMerge.added > 0 || contactMerge.merged > 0;
       const knowledgeChanged = mergedKnowledge.length !== localKnowledge.length;
-      const historyChanged = mergedHistory.length !== ingestionHistory.length;
+      const historyChanged = mergedHistory.length !== localHistory.length;
 
       if (!organizationChanged && !contactsChanged && !knowledgeChanged && !historyChanged) return;
 
@@ -596,7 +633,7 @@ const App: React.FC = () => {
         syncOrganizationContext(mergedOrganization);
       }
 
-      if (mergedOrganization.members.length > organization.members.length) {
+      if (mergedOrganization.members.length > currentOrganization.members.length) {
         setOrgMessage(`A teammate joined "${mergedOrganization.name}". Members now: ${mergedOrganization.members.length}.`);
       } else if (contactMerge.added > 0) {
         setOrgMessage(`Synced ${contactMerge.added} new shared contact${contactMerge.added === 1 ? '' : 's'} from "${mergedOrganization.name}".`);
@@ -606,21 +643,23 @@ const App: React.FC = () => {
     } finally {
       orgRefreshInFlightRef.current = false;
     }
-  }, [contacts, ingestionHistory, isSynced, organization, syncOrganizationContext, user]);
+  }, [isSynced, syncOrganizationContext]);
 
   useEffect(() => {
     if (!isSynced || !user || !organization) return;
     if (orgWorkspaceLoadedRef.current !== organization.id) return;
 
-    void refreshOrganizationWorkspaceFromCloud();
+    void refreshOrganizationWorkspaceFromCloud(true);
     const handleForegroundRefresh = () => {
-      void refreshOrganizationWorkspaceFromCloud();
+      if (document.visibilityState !== 'visible') return;
+      void refreshOrganizationWorkspaceFromCloud(true);
     };
     window.addEventListener('focus', handleForegroundRefresh);
     document.addEventListener('visibilitychange', handleForegroundRefresh);
     const intervalId = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
       void refreshOrganizationWorkspaceFromCloud();
-    }, 3000);
+    }, ORG_REFRESH_INTERVAL_MS);
 
     return () => {
       window.removeEventListener('focus', handleForegroundRefresh);
@@ -638,6 +677,7 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!organization) {
       orgWorkspaceLoadedRef.current = null;
+      lastOrgRefreshAtRef.current = 0;
     }
   }, [organization]);
 
@@ -1076,6 +1116,7 @@ const App: React.FC = () => {
     }
 
     try {
+      const { extractTextFromKnowledgeFile } = await import('./services/documentService');
       const extracted = await extractTextFromKnowledgeFile(file);
       const nextOrganization: Organization = {
         ...organization,
@@ -1410,33 +1451,44 @@ const App: React.FC = () => {
         </header>
 
         <div className="flex-1 overflow-auto p-8 relative">
-          {/* ChatInterface is ALWAYS rendered but hidden via CSS - preserves state */}
-          <div style={{ display: activeTab === 'chat' ? 'block' : 'none' }} className="h-full">
-            <ChatInterface
-              contacts={contacts}
-              onBatchUpdateContacts={handleBatchUpdateContacts}
-              settings={settings}
-              threads={threads}
-              activeThreadId={activeThreadId}
-              onUpdateThreads={handleUpdateThreads}
-              onSetActiveThread={setActiveThreadId}
-            />
-          </div>
+          {chatMounted && (
+            <Suspense fallback={activeTab === 'chat'
+              ? <div className="flex h-full items-center justify-center text-sm text-slate-500">Loading chat...</div>
+              : null}
+            >
+              <ChatInterface
+                isVisible={activeTab === 'chat'}
+                contacts={contacts}
+                onBatchUpdateContacts={handleBatchUpdateContacts}
+                settings={settings}
+                threads={threads}
+                activeThreadId={activeThreadId}
+                onUpdateThreads={handleUpdateThreads}
+                onSetActiveThread={setActiveThreadId}
+              />
+            </Suspense>
+          )}
 
           {/* Render other tabs normally */}
-          {activeTab !== 'chat' && renderContent()}
+          {activeTab !== 'chat' && (
+            <Suspense fallback={<div className="p-8 text-sm text-slate-500">Loading section...</div>}>
+              {renderContent()}
+            </Suspense>
+          )}
         </div>
 
         {selectedContact && (
-          <ContactDetail
-            contact={selectedContact}
-            onClose={() => setSelectedContact(null)}
-            onUpdate={handleUpdateContact}
-            onDelete={handleDeleteContact}
-            onToggleFlag={handleToggleTeamFlag}
-            onToggleIntroRequest={handleToggleIntroRequest}
-            settings={settings}
-          />
+          <Suspense fallback={null}>
+            <ContactDetail
+              contact={selectedContact}
+              onClose={() => setSelectedContact(null)}
+              onUpdate={handleUpdateContact}
+              onDelete={handleDeleteContact}
+              onToggleFlag={handleToggleTeamFlag}
+              onToggleIntroRequest={handleToggleIntroRequest}
+              settings={settings}
+            />
+          </Suspense>
         )}
 
         {/* Logout Confirmation Modal */}
@@ -1470,8 +1522,9 @@ const App: React.FC = () => {
             </div>
           </div>
         )}
-
-        <DebugPanel />
+        <Suspense fallback={null}>
+          <DebugPanel />
+        </Suspense>
       </main>
     </div>
   );

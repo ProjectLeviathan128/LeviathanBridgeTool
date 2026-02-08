@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useDeferredValue } from 'react';
 import { Contact } from '../types';
 import { Search, ChevronRight, AlertTriangle, X, SlidersHorizontal, Check, Flag, Trash2, Plus, ListChecks, MessageSquareText } from 'lucide-react';
 import { INTRO_REQUEST_LIST } from '../services/organizationService';
@@ -23,6 +23,7 @@ const ContactList: React.FC<ContactListProps> = ({
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [listInput, setListInput] = useState('');
     const [listFilter, setListFilter] = useState('All');
+    const deferredSearchTerm = useDeferredValue(searchTerm);
 
     // Advanced Filter State
     const [filters, setFilters] = useState({
@@ -61,16 +62,18 @@ const ContactList: React.FC<ContactListProps> = ({
 
     // Intelligent Filtering Logic
     const filteredContacts = useMemo(() => {
+        const searchLower = deferredSearchTerm.trim().toLowerCase();
+        const shouldSearchRawText = searchLower.length >= 3;
+
         return contacts.filter(c => {
             // 1. Text Search (Fuzzy-ish)
-            const searchLower = searchTerm.toLowerCase();
             const matchesSearch =
-                searchTerm === '' ||
+                searchLower === '' ||
                 c.name.toLowerCase().includes(searchLower) ||
                 c.headline.toLowerCase().includes(searchLower) ||
                 c.location.toLowerCase().includes(searchLower) ||
                 (c.tags && c.tags.some(t => t.toLowerCase().includes(searchLower))) ||
-                (c.rawText && c.rawText.toLowerCase().includes(searchLower));
+                (shouldSearchRawText && c.rawText && c.rawText.toLowerCase().includes(searchLower));
 
             if (!matchesSearch) return false;
 
@@ -104,7 +107,7 @@ const ContactList: React.FC<ContactListProps> = ({
 
             return true;
         });
-    }, [contacts, searchTerm, filters, listFilter]);
+    }, [contacts, deferredSearchTerm, filters, listFilter]);
 
     const activeFilterCount =
         (filters.status !== 'All' ? 1 : 0) +

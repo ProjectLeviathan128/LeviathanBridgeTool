@@ -45,6 +45,9 @@ function debounce<T extends (...args: any[]) => void>(fn: T, ms: number): T {
     }) as T;
 }
 
+const CLOUD_SYNC_DEBOUNCE_MS = 8000;
+const ORG_WORKSPACE_SYNC_DEBOUNCE_MS = 10000;
+
 /**
  * Safe JSON parse with fallback
  */
@@ -419,7 +422,7 @@ export async function saveToCloud(): Promise<SyncState> {
     }
 }
 
-export const saveToCloudDebounced = debounce(saveToCloud, 2000);
+export const saveToCloudDebounced = debounce(saveToCloud, CLOUD_SYNC_DEBOUNCE_MS);
 
 export async function loadFromCloud(): Promise<{
     contacts: Contact[] | null;
@@ -558,4 +561,7 @@ export async function saveOrganizationWorkspaceToCloud(
     }
 }
 
-export const saveOrganizationWorkspaceToCloudDebounced = debounce(saveOrganizationWorkspaceToCloud, 2000);
+export const saveOrganizationWorkspaceToCloudDebounced = debounce(
+    saveOrganizationWorkspaceToCloud,
+    ORG_WORKSPACE_SYNC_DEBOUNCE_MS
+);
