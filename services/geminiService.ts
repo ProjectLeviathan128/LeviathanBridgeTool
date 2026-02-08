@@ -398,7 +398,7 @@ ${malformedText}
         const response = await chatWithModelFallback(
             repairPrompt,
             modelCandidates,
-            { temperature: 0 },
+            {},
             'json-repair'
         );
         const repairedText = responseToText(response);
@@ -617,7 +617,6 @@ Schema:
                 DEFAULT_EVIDENCE_MODELS,
                 {
                     tools: [{ type: 'web_search' }],
-                    temperature: 0.1,
                 },
                 'evidence-search'
             );
@@ -636,7 +635,7 @@ Schema:
             response = await chatWithModelFallback(
                 evidencePrompt,
                 DEFAULT_EVIDENCE_MODELS,
-                { temperature: 0.1 },
+                {},
                 'evidence-search-fallback'
             );
         }
