@@ -184,6 +184,38 @@ function failureActionForUser(code: EnrichmentFailureCode): string {
     }
 }
 
+function buildCompatibilityRetryOptions(options: PuterChatOptions, error: unknown): PuterChatOptions | null {
+    const message = errorMessage(error).toLowerCase();
+    let changed = false;
+    const adjusted: PuterChatOptions = { ...options };
+
+    const temperatureUnsupported =
+        message.includes('temperature') &&
+        (
+            message.includes('unsupported parameter') ||
+            message.includes('unsupported value') ||
+            message.includes('does not support')
+        );
+    if (temperatureUnsupported && Object.prototype.hasOwnProperty.call(adjusted, 'temperature')) {
+        delete adjusted.temperature;
+        changed = true;
+    }
+
+    const toolsUnsupported =
+        message.includes('tools') &&
+        (
+            message.includes('unsupported parameter') ||
+            message.includes('unsupported value') ||
+            message.includes('does not support')
+        );
+    if (toolsUnsupported && Object.prototype.hasOwnProperty.call(adjusted, 'tools')) {
+        delete adjusted.tools;
+        changed = true;
+    }
+
+    return changed ? adjusted : null;
+}
+
 const WEB_SEARCH_MODEL = 'openai/gpt-5.2-chat';
 const MIN_VERIFIED_EVIDENCE = 2;
 const DEFAULT_ANALYSIS_MODELS_FAST = ['gemini-2.5-flash', 'openai/gpt-5-nano'];
@@ -260,18 +292,37 @@ async function chatWithModelFallback(
         try {
             return await runtime.ai.chat(prompt, mergedOptions);
         } catch (error) {
-            const normalized = normalizeEnrichmentError(error, contextLabel);
+            let effectiveError: unknown = error;
+            const compatibilityOptions = buildCompatibilityRetryOptions(mergedOptions, error);
+            if (compatibilityOptions) {
+                debugWarn('model', `Retrying model candidate with compatibility options (${contextLabel}).`, {
+                    model: model || 'default',
+                    removedOptions: {
+                        removedTemperature: !Object.prototype.hasOwnProperty.call(compatibilityOptions, 'temperature') &&
+                            Object.prototype.hasOwnProperty.call(mergedOptions, 'temperature'),
+                        removedTools: !Object.prototype.hasOwnProperty.call(compatibilityOptions, 'tools') &&
+                            Object.prototype.hasOwnProperty.call(mergedOptions, 'tools'),
+                    },
+                });
+                try {
+                    return await runtime.ai.chat(prompt, compatibilityOptions);
+                } catch (retryError) {
+                    effectiveError = retryError;
+                }
+            }
+
+            const normalized = normalizeEnrichmentError(effectiveError, contextLabel);
             const attempt: ModelAttemptFailure = {
                 model: model || 'default',
                 code: normalized.code,
-                error: errorMessage(error),
+                error: errorMessage(effectiveError),
             };
             attempts.push(attempt);
-            console.warn(`[Bridge] ${contextLabel} model failed: ${model || 'default'}`, error);
+            console.warn(`[Bridge] ${contextLabel} model failed: ${model || 'default'}`, effectiveError);
             debugWarn('model', `Model candidate failed (${contextLabel}).`, {
                 model: model || 'default',
                 code: normalized.code,
-                error: errorMessage(error),
+                error: errorMessage(effectiveError),
             });
 
             if (shouldShortCircuitModelFallback(normalized.code)) {
