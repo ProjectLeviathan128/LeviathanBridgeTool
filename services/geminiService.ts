@@ -995,6 +995,11 @@ interface BridgeChatMessage {
     content: string;
 }
 
+interface ScoredChatContact extends Contact {
+    scores: Scores;
+    enrichment: EnrichmentData;
+}
+
 /**
  * Bridge Chat Session - simulates a stateful chat with tool capabilities
  */
@@ -1054,6 +1059,277 @@ For regular conversation, just respond normally.`
         return mentionsSearch && !isMetaConversation;
     }
 
+    private isOperatorBriefingIntent(userMessage: string): boolean {
+        return /\b(briefing|operator summary|action plan|game plan|what should i do next|what do we do next|priority plan)\b/i.test(userMessage);
+    }
+
+    private isPipelineStatusIntent(userMessage: string): boolean {
+        return /\b(pipeline status|dashboard status|snapshot|health check|status report|universe status|where do we stand|how are we doing)\b/i.test(userMessage);
+    }
+
+    private isPriorityIntent(userMessage: string): boolean {
+        return /\b(top targets|priorit(?:y|ize)|who should we contact|who should we target|best contacts|highest potential|rank contacts)\b/i.test(userMessage);
+    }
+
+    private isRiskIntent(userMessage: string): boolean {
+        return /\b(risk|red flag|review backlog|collision|low confidence|concern|danger)\b/i.test(userMessage);
+    }
+
+    private isTrackAllocationIntent(userMessage: string): boolean {
+        return /\b(track allocation|track breakdown|distribution|mix|how many investment|how many government|how many strategic)\b/i.test(userMessage);
+    }
+
+    private isEnrichmentQueueIntent(userMessage: string): boolean {
+        return /\b(what should i enrich|what to enrich next|enrichment queue|pending enrichment|unenriched|new contacts)\b/i.test(userMessage);
+    }
+
+    private getScoredContacts(): ScoredChatContact[] {
+        return this.contacts.filter((contact): contact is ScoredChatContact => Boolean(contact.scores && contact.enrichment));
+    }
+
+    private getPrimaryTrack(contact: Contact): string {
+        const tracks = contact.enrichment?.tracks || [];
+        if (tracks.length === 0) return 'Unassigned';
+        if (tracks.length === 1) return tracks[0];
+        return 'Multi-Track';
+    }
+
+    private computeOpportunityScore(contact: ScoredChatContact): number {
+        const weighted =
+            contact.scores.investorFit.score * 0.3 +
+            contact.scores.valuesAlignment.score * 0.25 +
+            contact.scores.connectorScore.score * 0.15 +
+            contact.scores.maritimeRelevance.score * 0.15 +
+            contact.scores.govtAccess.score * 0.05 +
+            contact.scores.overallConfidence * 0.1;
+
+        let penalty = 0;
+        if (contact.status === 'Review Needed') penalty += 12;
+        if (contact.enrichment.collisionRisk) penalty += 12;
+        if (contact.enrichment.identityConfidence < 60) penalty += 8;
+        if (contact.scores.overallConfidence < 60) penalty += 8;
+
+        return Math.max(0, Math.min(100, Math.round(weighted - penalty)));
+    }
+
+    private computeRiskSeverity(contact: Contact): number {
+        let severity = 0;
+        if (contact.status === 'Review Needed') severity += 3;
+        if (contact.enrichment?.collisionRisk) severity += 4;
+        if ((contact.scores?.overallConfidence || 100) < 60) severity += 2;
+        if ((contact.enrichment?.evidenceLinks.length || 0) < 2 && contact.status !== 'New') severity += 1;
+        return severity;
+    }
+
+    private formatPipelineSnapshot(): string {
+        const total = this.contacts.length;
+        const newCount = this.contacts.filter((contact) => contact.status === 'New').length;
+        const enriched = this.contacts.filter((contact) => contact.status === 'Enriched').length;
+        const review = this.contacts.filter((contact) => contact.status === 'Review Needed').length;
+        const discarded = this.contacts.filter((contact) => contact.status === 'Discarded').length;
+        const processed = total - newCount;
+        const scored = this.getScoredContacts();
+        const avgConfidence = scored.length > 0
+            ? Math.round(scored.reduce((sum, contact) => sum + contact.scores.overallConfidence, 0) / scored.length)
+            : 0;
+        const evidenceReady = this.contacts.filter((contact) => (contact.enrichment?.evidenceLinks.length || 0) >= 2).length;
+        const highPriority = scored.filter((contact) => this.computeOpportunityScore(contact) >= 75).length;
+
+        return [
+            '### Pipeline Snapshot',
+            `- Total contacts: ${total}`,
+            `- Enriched: ${enriched} | Review Needed: ${review} | Pending: ${newCount} | Discarded: ${discarded}`,
+            `- Processed coverage: ${processed}/${total || 1}`,
+            `- Avg confidence: ${avgConfidence}%`,
+            `- Evidence-ready contacts (2+ links): ${evidenceReady}`,
+            `- High-priority targets (score >= 75): ${highPriority}`,
+        ].join('\n');
+    }
+
+    private formatTopTargets(limit = 5): string {
+        const scored = this.getScoredContacts()
+            .map((contact) => ({
+                contact,
+                opportunityScore: this.computeOpportunityScore(contact),
+            }))
+            .sort((a, b) => b.opportunityScore - a.opportunityScore)
+            .slice(0, limit);
+
+        if (scored.length === 0) {
+            return [
+                '### Priority Targets',
+                '- No scored contacts yet.',
+                '- Next step: enrich contacts first so I can rank opportunities.',
+            ].join('\n');
+        }
+
+        const lines = scored.map((entry, index) => {
+            const reason = entry.contact.enrichment.recommendedAction || 'No recommended action provided.';
+            const reasonPreview = reason.length > 90 ? `${reason.slice(0, 90)}...` : reason;
+            return `${index + 1}. ${entry.contact.name} | score ${entry.opportunityScore} | conf ${entry.contact.scores.overallConfidence}% | ${this.getPrimaryTrack(entry.contact)} | ${reasonPreview}`;
+        });
+
+        return [
+            '### Priority Targets',
+            ...lines,
+            '- Suggested move: run focused outreach on top 3 and enrich any missing profile context before outreach.',
+        ].join('\n');
+    }
+
+    private formatRiskBacklog(limit = 5): string {
+        const risky = this.contacts
+            .map((contact) => ({
+                contact,
+                severity: this.computeRiskSeverity(contact),
+            }))
+            .filter((entry) => entry.severity > 0)
+            .sort((a, b) => b.severity - a.severity)
+            .slice(0, limit);
+
+        if (risky.length === 0) {
+            return [
+                '### Risk Backlog',
+                '- No active risk flags right now.',
+            ].join('\n');
+        }
+
+        const lines = risky.map((entry, index) => {
+            const topRisk = entry.contact.enrichment?.alignmentRisks[0]
+                || (entry.contact.enrichment?.collisionRisk
+                    ? 'Potential identity collision risk.'
+                    : entry.contact.status === 'Review Needed'
+                        ? 'Marked for manual review.'
+                        : 'Low confidence signal.');
+            return `${index + 1}. ${entry.contact.name} | severity S${entry.severity} | ${topRisk}`;
+        });
+
+        return [
+            '### Risk Backlog',
+            ...lines,
+            '- Suggested move: clear top 3 risks before expanding outreach.',
+        ].join('\n');
+    }
+
+    private formatTrackAllocation(): string {
+        const counts = new Map<string, number>();
+        this.contacts.forEach((contact) => {
+            const track = this.getPrimaryTrack(contact);
+            counts.set(track, (counts.get(track) || 0) + 1);
+        });
+
+        const sorted = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+        if (sorted.length === 0) {
+            return '### Track Allocation\n- No contacts loaded.';
+        }
+
+        return [
+            '### Track Allocation',
+            ...sorted.map(([track, count]) => `- ${track}: ${count}`),
+        ].join('\n');
+    }
+
+    private formatEnrichmentQueue(limit = 8): string {
+        const pending = this.contacts.filter((contact) => contact.status === 'New').slice(0, limit);
+        if (pending.length === 0) {
+            return [
+                '### Enrichment Queue',
+                '- No pending contacts. Queue is clear.',
+            ].join('\n');
+        }
+
+        const preview = pending.map((contact, index) => `${index + 1}. ${contact.name} | ${contact.headline || 'No headline'}`);
+        const runCount = Math.min(3, pending.length);
+
+        return [
+            '### Enrichment Queue',
+            ...preview,
+            `- Suggested command: "enrich first ${runCount}"`,
+        ].join('\n');
+    }
+
+    private buildDeterministicAssistantResponse(userMessage: string): string | null {
+        if (this.isOperatorBriefingIntent(userMessage)) {
+            return [
+                this.formatPipelineSnapshot(),
+                '',
+                this.formatTopTargets(5),
+                '',
+                this.formatRiskBacklog(5),
+                '',
+                this.formatEnrichmentQueue(5),
+            ].join('\n');
+        }
+
+        if (this.isPriorityIntent(userMessage)) {
+            return this.formatTopTargets(7);
+        }
+
+        if (this.isRiskIntent(userMessage)) {
+            return this.formatRiskBacklog(7);
+        }
+
+        if (this.isPipelineStatusIntent(userMessage)) {
+            return this.formatPipelineSnapshot();
+        }
+
+        if (this.isTrackAllocationIntent(userMessage)) {
+            return this.formatTrackAllocation();
+        }
+
+        if (this.isEnrichmentQueueIntent(userMessage)) {
+            return this.formatEnrichmentQueue(8);
+        }
+
+        return null;
+    }
+
+    private summarizeToolResponse(toolResponse: any): string | null {
+        const toolName = toolResponse?.name;
+        const response = toolResponse?.response;
+
+        if (toolName === 'search_contacts') {
+            const total = typeof response?.count === 'number' ? response.count : 0;
+            const topResults = Array.isArray(response?.topResults) ? response.topResults.slice(0, 5) : [];
+            if (total === 0 || topResults.length === 0) {
+                return [
+                    '### Search Results',
+                    '- No contacts matched that query.',
+                    '- Try a broader query with role, sector, or location terms.',
+                ].join('\n');
+            }
+
+            const lines = topResults.map((result: any, index: number) => {
+                const name = typeof result?.name === 'string' ? result.name : 'Unknown';
+                const headline = typeof result?.headline === 'string' ? result.headline : 'No headline';
+                const status = typeof result?.status === 'string' ? result.status : 'Unknown';
+                return `${index + 1}. ${name} | ${headline} | ${status}`;
+            });
+
+            return [
+                '### Search Results',
+                `- Matches: ${total}`,
+                ...lines,
+                '- Next step: ask me to enrich top candidates once you pick a subset.',
+            ].join('\n');
+        }
+
+        if (toolName === 'enrich_contacts') {
+            const result = typeof response?.result === 'string' ? response.result : 'Enrichment completed.';
+            const scored = this.getScoredContacts().length;
+            const review = this.contacts.filter((contact) => contact.status === 'Review Needed').length;
+            const enriched = this.contacts.filter((contact) => contact.status === 'Enriched').length;
+
+            return [
+                '### Enrichment Run',
+                result,
+                `- Universe state: ${enriched} enriched | ${review} review needed | ${scored} scored`,
+                '- Next step: ask for "priority targets" to get ranked outreach order.',
+            ].join('\n');
+        }
+
+        return null;
+    }
+
     /**
      * Replaces the chat session's contact list with the latest app state.
      * Used when contacts are imported/deleted outside of chat tool calls.
@@ -1092,6 +1368,12 @@ For regular conversation, just respond normally.`
                     role: 'user',
                     content: `Tool result for ${toolResponse.name}: ${JSON.stringify(toolResponse.response)}`
                 });
+
+                const deterministicSummary = this.summarizeToolResponse(toolResponse);
+                if (deterministicSummary) {
+                    this.history.push({ role: 'model', content: deterministicSummary });
+                    return { text: deterministicSummary, functionCalls: null };
+                }
 
                 const response = await this.callGemini('Summarize the enrichment results for the user in a clear, actionable format.');
                 return { text: response, functionCalls: null };
@@ -1142,6 +1424,16 @@ For regular conversation, just respond normally.`
                     };
                 }
             }
+        }
+
+        const deterministicResponse = this.buildDeterministicAssistantResponse(userMessage);
+        if (deterministicResponse) {
+            this.history.push({ role: 'model', content: deterministicResponse });
+            return {
+                text: deterministicResponse,
+                functionCalls: null,
+                candidates: [{ groundingMetadata: { groundingChunks: [] } }]
+            };
         }
 
         // Regular conversation - call Gemini
