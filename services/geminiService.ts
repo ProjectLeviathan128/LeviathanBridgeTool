@@ -21,6 +21,169 @@ declare const puter: {
     };
 };
 
+type EnrichmentFailureCode =
+    | 'sdk_unavailable'
+    | 'auth_required'
+    | 'rate_limited'
+    | 'timeout'
+    | 'network'
+    | 'model_unavailable'
+    | 'all_models_failed'
+    | 'unknown';
+
+interface ModelAttemptFailure {
+    model: string;
+    code: EnrichmentFailureCode;
+    error: string;
+}
+
+class EnrichmentPipelineError extends Error {
+    readonly code: EnrichmentFailureCode;
+    readonly contextLabel: string;
+    readonly attempts: ModelAttemptFailure[];
+
+    constructor(
+        message: string,
+        code: EnrichmentFailureCode,
+        contextLabel: string,
+        attempts: ModelAttemptFailure[] = []
+    ) {
+        super(message);
+        this.name = 'EnrichmentPipelineError';
+        this.code = code;
+        this.contextLabel = contextLabel;
+        this.attempts = attempts;
+    }
+}
+
+function getPuterRuntime() {
+    if (typeof puter === 'undefined') return null;
+    return puter;
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+function classifyEnrichmentError(error: unknown): EnrichmentFailureCode {
+    const message = errorMessage(error).toLowerCase();
+
+    if (
+        message.includes('puter is not defined') ||
+        message.includes('cannot read properties of undefined') ||
+        message.includes('ai.chat is not a function')
+    ) {
+        return 'sdk_unavailable';
+    }
+
+    if (
+        /\b(401|403)\b/.test(message) ||
+        message.includes('unauthorized') ||
+        message.includes('forbidden') ||
+        message.includes('sign in') ||
+        message.includes('signin') ||
+        message.includes('auth')
+    ) {
+        return 'auth_required';
+    }
+
+    if (
+        message.includes('429') ||
+        message.includes('rate limit') ||
+        message.includes('too many requests') ||
+        message.includes('quota')
+    ) {
+        return 'rate_limited';
+    }
+
+    if (
+        message.includes('timeout') ||
+        message.includes('timed out') ||
+        message.includes('deadline exceeded') ||
+        message.includes('abort')
+    ) {
+        return 'timeout';
+    }
+
+    if (
+        message.includes('network') ||
+        message.includes('failed to fetch') ||
+        message.includes('fetch failed') ||
+        message.includes('cors') ||
+        message.includes('socket') ||
+        message.includes('offline')
+    ) {
+        return 'network';
+    }
+
+    if (
+        message.includes('unknown model') ||
+        message.includes('invalid model') ||
+        message.includes('unsupported model') ||
+        message.includes('model unavailable') ||
+        message.includes('model not found')
+    ) {
+        return 'model_unavailable';
+    }
+
+    return 'unknown';
+}
+
+function normalizeEnrichmentError(error: unknown, contextLabel: string): EnrichmentPipelineError {
+    if (error instanceof EnrichmentPipelineError) return error;
+
+    const code = classifyEnrichmentError(error);
+    return new EnrichmentPipelineError(
+        `Enrichment request failed during ${contextLabel}: ${errorMessage(error)}`,
+        code,
+        contextLabel
+    );
+}
+
+function shouldShortCircuitModelFallback(code: EnrichmentFailureCode): boolean {
+    return code === 'sdk_unavailable' || code === 'auth_required' || code === 'rate_limited';
+}
+
+function failureSummaryForUser(code: EnrichmentFailureCode): string {
+    switch (code) {
+        case 'sdk_unavailable':
+            return 'Enrichment failed: AI runtime is unavailable in this browser session.';
+        case 'auth_required':
+            return 'Enrichment failed: AI authorization is required. Sign in to Puter and retry.';
+        case 'rate_limited':
+            return 'Enrichment failed: AI rate limit reached. Retry in a few minutes.';
+        case 'timeout':
+            return 'Enrichment failed: AI request timed out before completion.';
+        case 'network':
+            return 'Enrichment failed: network error while contacting the AI provider.';
+        case 'model_unavailable':
+            return 'Enrichment failed: selected AI model is unavailable.';
+        case 'all_models_failed':
+            return 'Enrichment failed: all configured AI models were unavailable for this request.';
+        default:
+            return 'Enrichment failed due to an unexpected AI provider error.';
+    }
+}
+
+function failureActionForUser(code: EnrichmentFailureCode): string {
+    switch (code) {
+        case 'sdk_unavailable':
+            return 'Refresh the page and disable blockers that may prevent loading https://js.puter.com.';
+        case 'auth_required':
+            return 'Sign in to Puter from the app header, then retry enrichment.';
+        case 'rate_limited':
+            return 'Wait 2-5 minutes, then retry with a smaller batch.';
+        case 'timeout':
+        case 'network':
+            return 'Verify internet connectivity and retry enrichment.';
+        case 'model_unavailable':
+        case 'all_models_failed':
+            return 'Switch analysis mode in Settings and retry.';
+        default:
+            return 'Open the debug panel and retry enrichment to capture error details.';
+    }
+}
+
 const WEB_SEARCH_MODEL = 'openai/gpt-5.2-chat';
 const MIN_VERIFIED_EVIDENCE = 2;
 const DEFAULT_ANALYSIS_MODELS_FAST = ['gemini-2.5-flash', 'openai/gpt-5-nano'];
@@ -76,8 +239,17 @@ async function chatWithModelFallback(
     options: Omit<PuterChatOptions, 'model'> = {},
     contextLabel = 'analysis'
 ): Promise<any> {
+    const runtime = getPuterRuntime();
+    if (!runtime?.ai?.chat) {
+        throw new EnrichmentPipelineError(
+            `Puter AI runtime unavailable during ${contextLabel}.`,
+            'sdk_unavailable',
+            contextLabel
+        );
+    }
+
     const modelCandidates = [...candidateModels, ''];
-    let lastError: unknown = null;
+    const attempts: ModelAttemptFailure[] = [];
 
     for (const modelCandidate of modelCandidates) {
         const model = modelCandidate.trim();
@@ -86,21 +258,46 @@ async function chatWithModelFallback(
             : { ...options };
 
         try {
-            return await puter.ai.chat(prompt, mergedOptions);
+            return await runtime.ai.chat(prompt, mergedOptions);
         } catch (error) {
-            lastError = error;
+            const normalized = normalizeEnrichmentError(error, contextLabel);
+            const attempt: ModelAttemptFailure = {
+                model: model || 'default',
+                code: normalized.code,
+                error: errorMessage(error),
+            };
+            attempts.push(attempt);
             console.warn(`[Bridge] ${contextLabel} model failed: ${model || 'default'}`, error);
             debugWarn('model', `Model candidate failed (${contextLabel}).`, {
                 model: model || 'default',
-                error: error instanceof Error ? error.message : String(error)
+                code: normalized.code,
+                error: errorMessage(error),
             });
+
+            if (shouldShortCircuitModelFallback(normalized.code)) {
+                throw new EnrichmentPipelineError(
+                    `Model fallback halted during ${contextLabel}: ${normalized.message}`,
+                    normalized.code,
+                    contextLabel,
+                    attempts
+                );
+            }
         }
     }
 
-    debugError('model', `All model candidates failed (${contextLabel}).`, lastError);
-    throw lastError instanceof Error
-        ? lastError
-        : new Error(`All model candidates failed for ${contextLabel}.`);
+    const allModelUnavailable = attempts.length > 0 && attempts.every((attempt) => attempt.code === 'model_unavailable');
+    const failureCode: EnrichmentFailureCode = allModelUnavailable ? 'model_unavailable' : 'all_models_failed';
+    const failure = new EnrichmentPipelineError(
+        `All model candidates failed for ${contextLabel}.`,
+        failureCode,
+        contextLabel,
+        attempts
+    );
+    debugError('model', `All model candidates failed (${contextLabel}).`, {
+        code: failure.code,
+        attempts: failure.attempts,
+    });
+    throw failure;
 }
 
 function extractFirstJsonObject(text: string): string | null {
@@ -209,6 +406,11 @@ ${malformedText}
     } catch {
         return null;
     }
+}
+
+interface EvidenceCollectionResult {
+    verifiedEvidence: Evidence[];
+    failure?: EnrichmentPipelineError;
 }
 
 function isValidHttpUrl(url: string): boolean {
@@ -327,11 +529,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 async function verifyUrlReachable(url: string): Promise<boolean> {
-    if (!puter?.net?.fetch) return false;
+    const runtime = getPuterRuntime();
+    if (!runtime?.net?.fetch) return false;
 
     try {
         const headResponse = await withTimeout(
-            puter.net.fetch(url, { method: 'HEAD' }),
+            runtime.net.fetch(url, { method: 'HEAD' }),
             8000
         );
         if (headResponse.ok || (headResponse.status >= 200 && headResponse.status < 400)) {
@@ -343,7 +546,7 @@ async function verifyUrlReachable(url: string): Promise<boolean> {
 
     try {
         const getResponse = await withTimeout(
-            puter.net.fetch(url, { method: 'GET' }),
+            runtime.net.fetch(url, { method: 'GET' }),
             10000
         );
         return getResponse.ok || (getResponse.status >= 200 && getResponse.status < 400);
@@ -353,7 +556,8 @@ async function verifyUrlReachable(url: string): Promise<boolean> {
 }
 
 async function verifyEvidenceLinks(evidenceLinks: Evidence[]): Promise<Evidence[]> {
-    if (!puter?.net?.fetch) {
+    const runtime = getPuterRuntime();
+    if (!runtime?.net?.fetch) {
         // Runtime URL checks are unavailable in some browser contexts.
         // Keep normalized links so enrichment can continue instead of hard-blocking.
         return evidenceLinks.slice(0, 8);
@@ -369,7 +573,7 @@ async function verifyEvidenceLinks(evidenceLinks: Evidence[]): Promise<Evidence[
     return verified.length > 0 ? verified : evidenceLinks.slice(0, 8);
 }
 
-async function gatherWebEvidenceForContact(contact: Contact): Promise<Evidence[]> {
+async function gatherWebEvidenceForContact(contact: Contact): Promise<EvidenceCollectionResult> {
     const linkedInSeed = extractLinkedInUrlFromContact(contact);
     const evidencePrompt = `
 You are conducting contact due diligence.
@@ -396,6 +600,14 @@ Schema:
 `;
 
     try {
+        if (!getPuterRuntime()?.ai?.chat) {
+            throw new EnrichmentPipelineError(
+                'Puter AI runtime unavailable during evidence gathering.',
+                'sdk_unavailable',
+                'evidence-search'
+            );
+        }
+
         debugInfo('evidence', 'Starting evidence gathering.', { contactId: contact.id, name: contact.name });
         let response: any;
 
@@ -409,7 +621,17 @@ Schema:
                 },
                 'evidence-search'
             );
-        } catch {
+        } catch (error) {
+            const normalizedError = normalizeEnrichmentError(error, 'evidence-search');
+            if (shouldShortCircuitModelFallback(normalizedError.code)) {
+                throw normalizedError;
+            }
+
+            debugWarn('evidence', 'Tool-enabled web search failed; falling back to plain retrieval.', {
+                contactId: contact.id,
+                code: normalizedError.code,
+                error: normalizedError.message,
+            });
             // Fall back to plain generation if tool-enabled search is unavailable.
             response = await chatWithModelFallback(
                 evidencePrompt,
@@ -467,14 +689,17 @@ Schema:
             candidateCount: candidateEvidence.length,
             verifiedCount: verifiedEvidence.length
         });
-        return verifiedEvidence;
+        return { verifiedEvidence };
     } catch (error) {
-        console.error('Web evidence gathering failed:', error);
+        const normalizedError = normalizeEnrichmentError(error, 'evidence-search');
+        console.error('Web evidence gathering failed:', normalizedError);
         debugError('evidence', 'Evidence gathering failed.', {
             contactId: contact.id,
-            error: error instanceof Error ? error.message : String(error)
+            code: normalizedError.code,
+            error: normalizedError.message,
+            attempts: normalizedError.attempts
         });
-        return [];
+        return { verifiedEvidence: [], failure: normalizedError };
     }
 }
 
@@ -486,6 +711,52 @@ function createDefaultProvenance(score: number, reasoning: string): ScoreProvena
         reasoning,
         contributingFactors: [],
         missingDataPenalty: true,
+    };
+}
+
+function uniqueStrings(values: string[]): string[] {
+    return Array.from(new Set(values.filter((value) => value.trim().length > 0)));
+}
+
+function createAnalysisFailureResult(
+    code: EnrichmentFailureCode,
+    options: { evidenceLinks?: Evidence[]; additionalRisks?: string[]; attempts?: ModelAttemptFailure[] } = {}
+): { scores: Scores; enrichment: EnrichmentData } {
+    const summary = failureSummaryForUser(code);
+    const modelAttemptRisks = (options.attempts || []).map((attempt) => {
+        return `Model ${attempt.model} failed (${attempt.code}): ${attempt.error}`;
+    });
+    const alignmentRisks = uniqueStrings([
+        summary,
+        ...(options.additionalRisks || []),
+        ...modelAttemptRisks,
+    ]);
+
+    return {
+        scores: {
+            investorFit: createDefaultProvenance(0, summary),
+            valuesAlignment: createDefaultProvenance(0, summary),
+            govtAccess: createDefaultProvenance(0, summary),
+            maritimeRelevance: createDefaultProvenance(0, summary),
+            connectorScore: createDefaultProvenance(0, summary),
+            overallConfidence: 0,
+        },
+        enrichment: {
+            summary,
+            alignmentRisks,
+            evidenceLinks: options.evidenceLinks || [],
+            recommendedAngle: 'Pause outreach while enrichment pipeline issues are resolved.',
+            recommendedAction: failureActionForUser(code),
+            tracks: [],
+            flaggedAttributes: uniqueStrings([
+                'analysis_error',
+                'manual_review_required',
+                `error_${code}`,
+            ]),
+            identityConfidence: 0,
+            collisionRisk: true,
+            lastVerified: new Date().toISOString(),
+        },
     };
 }
 
@@ -505,7 +776,31 @@ export async function analyzeContactWithGemini(
         focusMode: settings.focusMode,
         analysisMode: settings.analysisModel
     });
-    const verifiedEvidence = await gatherWebEvidenceForContact(contact);
+    const evidenceCollection = await gatherWebEvidenceForContact(contact);
+    const verifiedEvidence = evidenceCollection.verifiedEvidence;
+
+    if (evidenceCollection.failure && verifiedEvidence.length === 0) {
+        debugError('analysis', 'Evidence stage failed before analysis.', {
+            contactId: contact.id,
+            code: evidenceCollection.failure.code,
+            error: evidenceCollection.failure.message,
+            attempts: evidenceCollection.failure.attempts,
+        });
+        return createAnalysisFailureResult(evidenceCollection.failure.code, {
+            additionalRisks: [
+                `Evidence stage failure: ${evidenceCollection.failure.message}`,
+            ],
+            attempts: evidenceCollection.failure.attempts,
+        });
+    }
+
+    if (evidenceCollection.failure && verifiedEvidence.length > 0) {
+        debugWarn('analysis', 'Evidence stage partially failed; continuing with recovered evidence.', {
+            contactId: contact.id,
+            code: evidenceCollection.failure.code,
+            verifiedCount: verifiedEvidence.length,
+        });
+    }
 
     const prompt = `
 ${BRIDGE_SYSTEM_INSTRUCTION}
@@ -623,34 +918,22 @@ Analyze this contact and return a JSON object with the following structure. DO N
         });
         return normalized;
     } catch (error) {
-        console.error('Gemini analysis error:', error);
+        const normalizedError = normalizeEnrichmentError(error, 'contact-analysis');
+        console.error('Gemini analysis error:', normalizedError);
         debugError('analysis', 'Contact analysis failed.', {
             contactId: contact.id,
-            error: error instanceof Error ? error.message : String(error)
+            code: normalizedError.code,
+            error: normalizedError.message,
+            attempts: normalizedError.attempts,
         });
 
-        // Return default scores on error
-        return {
-            scores: {
-                investorFit: createDefaultProvenance(0, 'Analysis failed'),
-                valuesAlignment: createDefaultProvenance(0, 'Analysis failed'),
-                govtAccess: createDefaultProvenance(0, 'Analysis failed'),
-                maritimeRelevance: createDefaultProvenance(0, 'Analysis failed'),
-                connectorScore: createDefaultProvenance(0, 'Analysis failed'),
-                overallConfidence: 0,
-            },
-            enrichment: {
-                summary: 'Analysis failed - please try again',
-                alignmentRisks: [],
-                evidenceLinks: [],
-                recommendedAngle: 'N/A',
-                recommendedAction: 'Retry analysis',
-                tracks: [],
-                flaggedAttributes: ['analysis_error'],
-                identityConfidence: 0,
-                collisionRisk: false,
-            },
-        };
+        return createAnalysisFailureResult(normalizedError.code, {
+            evidenceLinks: verifiedEvidence,
+            additionalRisks: [
+                `Analysis stage failure: ${normalizedError.message}`,
+            ],
+            attempts: normalizedError.attempts,
+        });
     }
 }
 
@@ -850,7 +1133,12 @@ For regular conversation, just respond normally.`
             .join('\n\n') + `\n\nUser: ${userMessage}\n\nAssistant:`;
 
         try {
-            const response = await puter.ai.chat(conversationPrompt, { model: this.model });
+            const response = await chatWithModelFallback(
+                conversationPrompt,
+                [this.model],
+                {},
+                'chat-session'
+            );
 
             let responseText: string;
             if (typeof response === 'string') {
@@ -866,8 +1154,14 @@ For regular conversation, just respond normally.`
             this.history.push({ role: 'model', content: responseText });
             return responseText;
         } catch (error) {
-            console.error('Chat error:', error);
-            return 'I encountered an error processing your request. Please try again.';
+            const normalizedError = normalizeEnrichmentError(error, 'chat-session');
+            console.error('Chat error:', normalizedError);
+            debugError('chat.model', 'Chat model request failed.', {
+                code: normalizedError.code,
+                error: normalizedError.message,
+                attempts: normalizedError.attempts,
+            });
+            return `${failureSummaryForUser(normalizedError.code)} ${failureActionForUser(normalizedError.code)}`;
         }
     }
 }

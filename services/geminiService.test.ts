@@ -209,4 +209,27 @@ describe('analyzeContactWithGemini evidence gate', () => {
     expect(String(chatMock.mock.calls[2][0])).toContain('JSON repair utility');
     expect(result.enrichment.summary).toContain('Recovered by JSON repair pass.');
   });
+
+  it('returns explicit SDK failure when Puter runtime is unavailable', async () => {
+    delete (globalThis as any).puter;
+
+    const result = await analyzeContactWithGemini(baseContact, settings);
+
+    expect(result.scores.overallConfidence).toBe(0);
+    expect(result.enrichment.summary).toContain('AI runtime is unavailable');
+    expect(result.enrichment.flaggedAttributes).toContain('error_sdk_unavailable');
+    expect(result.enrichment.recommendedAction).toContain('Refresh the page');
+  });
+
+  it('returns explicit auth failure when provider requires sign-in', async () => {
+    chatMock.mockRejectedValue(new Error('401 Unauthorized'));
+
+    const result = await analyzeContactWithGemini(baseContact, settings);
+
+    expect(chatMock).toHaveBeenCalledTimes(1);
+    expect(result.scores.overallConfidence).toBe(0);
+    expect(result.enrichment.summary).toContain('AI authorization is required');
+    expect(result.enrichment.flaggedAttributes).toContain('error_auth_required');
+    expect(result.enrichment.recommendedAction).toContain('Sign in to Puter');
+  });
 });

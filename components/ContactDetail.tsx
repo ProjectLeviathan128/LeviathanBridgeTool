@@ -3,6 +3,7 @@ import { Contact, ScoreProvenance, AppSettings } from '../types';
 import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from 'recharts';
 import { analyzeContactWithGemini } from '../services/geminiService';
 import { assessEnrichmentQuality } from '../services/enrichmentGuards';
+import { debugError, debugWarn, requestDebugPanelOpen } from '../services/debugService';
 import { AlertOctagon, Brain, X, Loader2, ShieldAlert, Fingerprint, History, Info, ExternalLink, RefreshCw } from 'lucide-react';
 
 interface ContactDetailProps {
@@ -22,6 +23,19 @@ const ContactDetail: React.FC<ContactDetailProps> = ({ contact, onClose, onUpdat
     try {
       const result = await analyzeContactWithGemini(contact, settings);
       const quality = assessEnrichmentQuality(result.enrichment);
+      const isPipelineError = result.enrichment.flaggedAttributes.includes('analysis_error');
+      if (isPipelineError) {
+        setError(result.enrichment.summary);
+        debugWarn('contact.detail', 'Manual enrichment returned pipeline error.', {
+          contactId: contact.id,
+          name: contact.name,
+          summary: result.enrichment.summary,
+          flags: result.enrichment.flaggedAttributes,
+        });
+        requestDebugPanelOpen();
+      } else {
+        setError(null);
+      }
       onUpdate({
         ...contact,
         status: quality.requiresReview ? 'Review Needed' : 'Enriched',
@@ -29,7 +43,13 @@ const ContactDetail: React.FC<ContactDetailProps> = ({ contact, onClose, onUpdat
         enrichment: result.enrichment
       });
     } catch (err) {
-      setError('Analysis failed. Please try again.');
+      debugError('contact.detail', 'Manual enrichment request threw an exception.', {
+        contactId: contact.id,
+        name: contact.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      setError('Enrichment request crashed before completion. Check Debug panel and retry.');
+      requestDebugPanelOpen();
     } finally {
       setIsAnalyzing(false);
     }

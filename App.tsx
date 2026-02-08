@@ -94,6 +94,11 @@ const App: React.FC = () => {
     });
 
     debugInfo('app', 'Debug panel initialized.');
+    if (typeof puter === 'undefined') {
+      debugWarn('auth', 'Puter SDK global not detected at app init. AI enrichment may fail until script loads.');
+    } else {
+      debugInfo('auth', 'Puter SDK detected.');
+    }
 
     return () => {
       console.log = originalConsole.log;

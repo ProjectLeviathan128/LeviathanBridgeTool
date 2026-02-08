@@ -332,8 +332,10 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
                                 const analysis = await analyzeContactWithGemini(contact, settings);
                                 const quality = assessEnrichmentQuality(analysis.enrichment);
-                                const finalStatus: Contact['status'] = quality.requiresReview ? 'Review Needed' : 'Enriched';
-                                if (quality.requiresReview) {
+                                const pipelineError = analysis.enrichment.flaggedAttributes.includes('analysis_error');
+                                const requiresReview = pipelineError || quality.requiresReview;
+                                const finalStatus: Contact['status'] = requiresReview ? 'Review Needed' : 'Enriched';
+                                if (requiresReview) {
                                     reviewNeededCount += 1;
                                 }
 
@@ -368,7 +370,16 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
                                 // Show brief summary in progress
                                 const shortSummary = analysis.enrichment.summary.slice(0, 80) + '...';
-                                if (quality.requiresReview) {
+                                if (pipelineError) {
+                                    summaries.push(`✗ ${contact.name}: ${analysis.enrichment.summary}`);
+                                    debugError('chat.enrich', 'Contact analysis returned pipeline error.', {
+                                        contactId: contact.id,
+                                        name: contact.name,
+                                        summary: analysis.enrichment.summary,
+                                        flags: analysis.enrichment.flaggedAttributes
+                                    });
+                                    requestDebugPanelOpen();
+                                } else if (quality.requiresReview) {
                                     summaries.push(`\u26a0 ${contact.name}: Review Needed - ${quality.issues.join(' ')}`);
                                 } else {
                                     summaries.push(`\u2713 ${contact.name}: ${shortSummary}`);
