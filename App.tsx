@@ -1083,6 +1083,7 @@ const App: React.FC = () => {
         return (
           <Dashboard
             contacts={contacts}
+            organization={organization}
             onSelectContact={handleOpenContactFromDashboard}
             onDeleteContact={handleDeleteContact}
             onToggleFlag={handleToggleTeamFlag}

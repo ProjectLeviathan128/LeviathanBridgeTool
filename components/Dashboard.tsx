@@ -16,7 +16,7 @@ import {
   ZAxis,
   ReferenceLine,
 } from 'recharts';
-import { Contact } from '../types';
+import { Contact, Organization } from '../types';
 import {
   Activity,
   AlertTriangle,
@@ -36,6 +36,7 @@ import {
 
 interface DashboardProps {
   contacts: Contact[];
+  organization?: Organization | null;
   onSelectContact?: (contactId: string) => void;
   onDeleteContact?: (contactId: string) => void;
   onToggleFlag?: (contactId: string) => void;
@@ -74,6 +75,19 @@ interface RiskItem {
 interface DomainCount {
   domain: string;
   count: number;
+}
+
+interface OutreachFlagItem {
+  id: string;
+  name: string;
+  headline: string;
+  track: string;
+  status: Contact['status'];
+  score: number | null;
+  confidence: number | null;
+  teamFlagged: boolean;
+  introRequested: boolean;
+  introRequestedAt?: string;
 }
 
 const TRACK_COLORS: Record<string, string> = {
@@ -125,6 +139,7 @@ function formatWhen(iso?: string): string {
 
 const Dashboard: React.FC<DashboardProps> = ({
   contacts,
+  organization,
   onSelectContact,
   onDeleteContact,
   onToggleFlag,
@@ -218,6 +233,45 @@ const Dashboard: React.FC<DashboardProps> = ({
         count: contacts.filter((c) => c.ingestionMeta.trustLevel === 'Third-Party').length,
       },
     ];
+
+    const flaggedOutreachCandidates: OutreachFlagItem[] = contacts
+      .filter((c) => (Boolean(c.teamFlagged) || Boolean(c.introRequested)) && c.status !== 'Discarded')
+      .map((c) => {
+        const score = c.scores
+          ? Math.round(
+            c.scores.investorFit.score * 0.35 +
+            c.scores.valuesAlignment.score * 0.25 +
+            c.scores.connectorScore.score * 0.15 +
+            c.scores.maritimeRelevance.score * 0.15 +
+            c.scores.overallConfidence * 0.1
+          )
+          : null;
+
+        return {
+          id: c.id,
+          name: c.name,
+          headline: c.headline,
+          track: bucketTrack(c),
+          status: c.status,
+          score,
+          confidence: c.scores?.overallConfidence ?? null,
+          teamFlagged: Boolean(c.teamFlagged),
+          introRequested: Boolean(c.introRequested),
+          introRequestedAt: c.introRequestedAt,
+        };
+      })
+      .sort((a, b) => {
+        if (a.introRequested !== b.introRequested) return a.introRequested ? -1 : 1;
+        if (a.teamFlagged !== b.teamFlagged) return a.teamFlagged ? -1 : 1;
+        if ((b.score ?? -1) !== (a.score ?? -1)) return (b.score ?? -1) - (a.score ?? -1);
+        const aTime = Date.parse(a.introRequestedAt || '');
+        const bTime = Date.parse(b.introRequestedAt || '');
+        if (!Number.isNaN(aTime) || !Number.isNaN(bTime)) return aTime - bTime;
+        return a.name.localeCompare(b.name);
+      });
+
+    const flaggedOutreachQueue = flaggedOutreachCandidates.slice(0, 8);
+    const flaggedOutreachTotal = flaggedOutreachCandidates.length;
 
     const priorityQueue: PriorityItem[] = contacts
       .filter(
@@ -347,6 +401,8 @@ const Dashboard: React.FC<DashboardProps> = ({
       confidenceBands,
       statusBars,
       sourceBars,
+      flaggedOutreachQueue,
+      flaggedOutreachTotal,
       priorityQueue,
       riskQueue,
       topDomains,
@@ -356,18 +412,141 @@ const Dashboard: React.FC<DashboardProps> = ({
     };
   }, [contacts]);
 
+  const orgMemberCount = organization?.members.length || 0;
+  const orgUpdatedLabel = organization
+    ? new Date(organization.updatedAt).toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+    : null;
+
+  const organizationAndOutreachSection = (
+    <section className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+      <div
+        className={`xl:col-span-1 p-6 rounded-lg border ${
+          organization
+            ? 'bg-emerald-950/20 border-emerald-700/40'
+            : 'bg-amber-950/20 border-amber-700/40'
+        }`}
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-widest text-slate-400">Organization Status</p>
+            <h3 className="text-lg font-semibold text-white mt-1">
+              {organization ? organization.name : 'Not Connected'}
+            </h3>
+            <p className="text-xs text-slate-300 mt-2">
+              {organization
+                ? 'Connected to shared organization data. Contacts, lists, and knowledge sync for members.'
+                : 'Create or join an organization in the Organization tab to collaborate in one shared workspace.'}
+            </p>
+          </div>
+          {organization ? (
+            <Users className="text-emerald-300 w-6 h-6 shrink-0" />
+          ) : (
+            <AlertTriangle className="text-amber-300 w-6 h-6 shrink-0" />
+          )}
+        </div>
+        {organization && (
+          <div className="grid grid-cols-2 gap-2 mt-4">
+            <div className="bg-slate-900/70 border border-slate-700 rounded px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500">Members</p>
+              <p className="text-sm font-semibold text-white mt-1">{orgMemberCount}</p>
+            </div>
+            <div className="bg-slate-900/70 border border-slate-700 rounded px-3 py-2">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500">Updated</p>
+              <p className="text-sm font-semibold text-white mt-1">{orgUpdatedLabel}</p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="xl:col-span-2 bg-slate-800 p-6 rounded-lg border border-slate-700">
+        <div className="flex items-start justify-between mb-4 gap-4">
+          <div>
+            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+              <Flag size={18} className="text-amber-300" />
+              Outreach Flag Queue
+            </h3>
+            <p className="text-xs text-slate-400 mt-1">Top investors flagged for immediate team outreach.</p>
+          </div>
+          <span className="text-xs uppercase tracking-widest text-slate-400">
+            {data.flaggedOutreachTotal} flagged
+          </span>
+        </div>
+        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+          {data.flaggedOutreachQueue.length === 0 && (
+            <p className="text-sm text-slate-500">No flagged outreach contacts yet.</p>
+          )}
+          {data.flaggedOutreachQueue.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onSelectContact?.(item.id)}
+              className="w-full text-left bg-slate-900 border border-slate-700 rounded-lg p-3 hover:border-blue-700/60 transition-colors"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-white truncate">{item.name}</p>
+                  <p className="text-xs text-slate-400 truncate mt-0.5">{item.headline || 'No headline provided'}</p>
+                  <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                    {item.introRequested && (
+                      <span className="text-[10px] uppercase tracking-wider text-emerald-300 border border-emerald-600/50 bg-emerald-900/30 px-1.5 py-0.5 rounded">
+                        Intro Requested
+                      </span>
+                    )}
+                    {item.teamFlagged && (
+                      <span className="text-[10px] uppercase tracking-wider text-amber-300 border border-amber-600/50 bg-amber-900/30 px-1.5 py-0.5 rounded">
+                        Team Flagged
+                      </span>
+                    )}
+                    <span className="text-[10px] uppercase tracking-wider text-cyan-300 border border-cyan-600/40 bg-cyan-900/20 px-1.5 py-0.5 rounded">
+                      {item.track}
+                    </span>
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  {item.score !== null ? (
+                    <>
+                      <p className="text-lg font-bold text-cyan-300 leading-none">{item.score}</p>
+                      <p className="text-[11px] text-slate-400 mt-1">{item.confidence ?? 0}% conf</p>
+                    </>
+                  ) : (
+                    <p className="text-[11px] text-slate-500">Unscored</p>
+                  )}
+                  <p className="text-[11px] text-slate-500 mt-1">{item.status}</p>
+                </div>
+              </div>
+              {item.introRequestedAt && (
+                <p className="text-[11px] text-slate-500 mt-2">
+                  Intro queue since {formatWhen(item.introRequestedAt)}
+                </p>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+
   if (contacts.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center h-[34rem] text-slate-500">
-        <Activity className="w-16 h-16 mb-4 opacity-25" />
-        <h3 className="text-2xl font-semibold text-slate-200">Mission Control Ready</h3>
-        <p className="text-sm text-slate-400 mt-2">Ingest contacts to activate live pipeline intelligence.</p>
+      <div className="space-y-6 pb-12">
+        {organizationAndOutreachSection}
+        <div className="flex flex-col items-center justify-center h-[24rem] text-slate-500 bg-slate-900 border border-slate-800 rounded-xl">
+          <Activity className="w-16 h-16 mb-4 opacity-25" />
+          <h3 className="text-2xl font-semibold text-slate-200">Mission Control Ready</h3>
+          <p className="text-sm text-slate-400 mt-2">Ingest contacts to activate live pipeline intelligence.</p>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-6 pb-12">
+      {organizationAndOutreachSection}
       <section className="bg-gradient-to-r from-slate-900 via-slate-900 to-cyan-950 border border-slate-700 rounded-xl p-6">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
           <div>
