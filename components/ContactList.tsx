@@ -1,12 +1,14 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Contact } from '../types';
-import { Search, ChevronRight, AlertTriangle, X, SlidersHorizontal, Check, Flag, Trash2, Plus, ListChecks } from 'lucide-react';
+import { Search, ChevronRight, AlertTriangle, X, SlidersHorizontal, Check, Flag, Trash2, Plus, ListChecks, MessageSquareText } from 'lucide-react';
+import { INTRO_REQUEST_LIST } from '../services/organizationService';
 
 interface ContactListProps {
     contacts: Contact[];
     onSelectContact: (contact: Contact) => void;
     onBatchUpdateContacts: (updates: Contact[]) => void;
     onDeleteContacts: (contactIds: string[]) => void;
+    onToggleIntroRequest: (contactId: string) => void;
 }
 
 const ContactList: React.FC<ContactListProps> = ({
@@ -14,6 +16,7 @@ const ContactList: React.FC<ContactListProps> = ({
     onSelectContact,
     onBatchUpdateContacts,
     onDeleteContacts,
+    onToggleIntroRequest,
 }) => {
     const [searchTerm, setSearchTerm] = useState('');
     const [isFilterOpen, setIsFilterOpen] = useState(false);
@@ -128,6 +131,7 @@ const ContactList: React.FC<ContactListProps> = ({
 
     const filteredIds = useMemo(() => filteredContacts.map(contact => contact.id), [filteredContacts]);
     const selectedCount = selectedIds.size;
+    const introQueueCount = useMemo(() => contacts.filter(contact => contact.introRequested).length, [contacts]);
 
     const toggleSelected = (contactId: string) => {
         setSelectedIds(prev => {
@@ -161,6 +165,23 @@ const ContactList: React.FC<ContactListProps> = ({
 
     const handleBulkFlag = (flagged: boolean) => {
         applyUpdatesToSelected(contact => ({ ...contact, teamFlagged: flagged }));
+    };
+
+    const handleBulkIntroQueue = (requested: boolean) => {
+        applyUpdatesToSelected(contact => {
+            const lists = new Set((contact.lists || []).map(list => list.trim()).filter(Boolean));
+            if (requested) {
+                lists.add(INTRO_REQUEST_LIST);
+            } else {
+                lists.delete(INTRO_REQUEST_LIST);
+            }
+            return {
+                ...contact,
+                lists: Array.from(lists),
+                introRequested: requested,
+                introRequestedAt: requested ? (contact.introRequestedAt || new Date().toISOString()) : undefined
+            };
+        });
     };
 
     const handleBulkAddToList = () => {
@@ -240,6 +261,18 @@ const ContactList: React.FC<ContactListProps> = ({
                         </select>
 
                         <button
+                            onClick={() => setListFilter(listFilter === INTRO_REQUEST_LIST ? 'All' : INTRO_REQUEST_LIST)}
+                            className={`px-3 py-2 text-xs rounded border transition-colors inline-flex items-center gap-1 ${listFilter === INTRO_REQUEST_LIST
+                                ? 'bg-emerald-600 border-emerald-500 text-white'
+                                : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-700'
+                                }`}
+                            title="Show intro request queue"
+                        >
+                            <MessageSquareText size={12} />
+                            Intro Queue ({introQueueCount})
+                        </button>
+
+                        <button
                             onClick={() => setIsFilterOpen(!isFilterOpen)}
                             className={`flex items-center gap-2 px-4 py-2.5 rounded border transition-colors font-medium text-sm ${isFilterOpen || activeFilterCount > 0 ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-700'}`}
                         >
@@ -276,6 +309,19 @@ const ContactList: React.FC<ContactListProps> = ({
                                 className="px-3 py-1.5 text-xs rounded border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors"
                             >
                                 Unflag
+                            </button>
+                            <button
+                                onClick={() => handleBulkIntroQueue(true)}
+                                className="px-3 py-1.5 text-xs rounded border border-emerald-700/50 text-emerald-300 hover:bg-emerald-900/20 transition-colors inline-flex items-center gap-1"
+                            >
+                                <MessageSquareText size={12} />
+                                Queue Intro
+                            </button>
+                            <button
+                                onClick={() => handleBulkIntroQueue(false)}
+                                className="px-3 py-1.5 text-xs rounded border border-slate-600 text-slate-300 hover:bg-slate-700 transition-colors"
+                            >
+                                Remove Intro
                             </button>
                             <div className="flex items-center gap-1 ml-1">
                                 <input
@@ -384,6 +430,12 @@ const ContactList: React.FC<ContactListProps> = ({
                                                     Flagged
                                                 </span>
                                             )}
+                                            {contact.introRequested && (
+                                                <span className="text-[10px] uppercase tracking-wider text-emerald-300 border border-emerald-600/50 bg-emerald-900/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
+                                                    <MessageSquareText size={10} />
+                                                    Intro
+                                                </span>
+                                            )}
                                             {(contact.lists || []).slice(0, 1).map(list => (
                                                 <span
                                                     key={list}
@@ -393,6 +445,17 @@ const ContactList: React.FC<ContactListProps> = ({
                                                     {list}
                                                 </span>
                                             ))}
+                                            <button
+                                                type="button"
+                                                onClick={() => onToggleIntroRequest(contact.id)}
+                                                className={`p-1 rounded border transition-colors ${contact.introRequested
+                                                        ? 'text-emerald-300 border-emerald-700/50 bg-emerald-900/20'
+                                                        : 'text-slate-500 border-slate-700 hover:text-emerald-300 hover:border-emerald-700/50'
+                                                    }`}
+                                                title={contact.introRequested ? 'Remove from intro queue' : 'Request intro'}
+                                            >
+                                                <MessageSquareText size={12} />
+                                            </button>
                                             <button
                                                 type="button"
                                                 onClick={() => handleToggleSingleFlag(contact)}

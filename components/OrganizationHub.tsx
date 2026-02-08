@@ -5,6 +5,7 @@ import {
   Download,
   FileUp,
   GitMerge,
+  KeyRound,
   Loader2,
   Network,
   RefreshCw,
@@ -60,6 +61,7 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
   const [editingThesis, setEditingThesis] = useState('');
   const [editingContext, setEditingContext] = useState('');
   const [copied, setCopied] = useState(false);
+  const [copiedPin, setCopiedPin] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [localMessage, setLocalMessage] = useState<string | null>(null);
 
@@ -67,9 +69,11 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
   const createContactsInputRef = useRef<HTMLInputElement>(null);
   const createThesisInputRef = useRef<HTMLInputElement>(null);
   const createContextInputRef = useRef<HTMLInputElement>(null);
+  const createBusinessPlanInputRef = useRef<HTMLInputElement>(null);
   const orgContactsInputRef = useRef<HTMLInputElement>(null);
   const orgThesisInputRef = useRef<HTMLInputElement>(null);
   const orgContextInputRef = useRef<HTMLInputElement>(null);
+  const orgBusinessPlanInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!organization) return;
@@ -86,6 +90,17 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
       setTimeout(() => setCopied(false), 1500);
     } catch {
       setCopied(false);
+    }
+  };
+
+  const handleCopyPin = async () => {
+    if (!organization?.invitePin) return;
+    try {
+      await navigator.clipboard.writeText(organization.invitePin);
+      setCopiedPin(true);
+      setTimeout(() => setCopiedPin(false), 1500);
+    } catch {
+      setCopiedPin(false);
     }
   };
 
@@ -179,6 +194,11 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
         </p>
       </div>
 
+      <div className="px-4 py-3 bg-slate-900 border border-slate-800 rounded text-sm text-slate-300">
+        <p className="font-medium text-white mb-1">How Organization Sharing Works</p>
+        <p>Thesis + strategic context sync when your teammate joins with your invite. Contact universes sync when each person imports an org package (or CSV) and dedupe runs.</p>
+      </div>
+
       {orgMessage && (
         <div className="px-4 py-3 bg-blue-900/20 border border-blue-800/50 rounded text-sm text-blue-200">
           {orgMessage}
@@ -222,7 +242,7 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
               <p className="text-xs text-slate-400">
                 Upload existing docs to prefill thesis/context and import your current contact CSV.
               </p>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 <button
                   onClick={() => createThesisInputRef.current?.click()}
                   disabled={isUploading}
@@ -238,6 +258,14 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
                 >
                   {isUploading ? <Loader2 size={12} className="animate-spin" /> : <FileUp size={12} />}
                   Context Doc
+                </button>
+                <button
+                  onClick={() => createBusinessPlanInputRef.current?.click()}
+                  disabled={isUploading}
+                  className="py-2 text-xs bg-emerald-700 hover:bg-emerald-600 disabled:bg-emerald-700/60 text-white rounded border border-emerald-500/30 transition-colors inline-flex items-center justify-center gap-1.5"
+                >
+                  {isUploading ? <Loader2 size={12} className="animate-spin" /> : <FileUp size={12} />}
+                  Business Plan PDF
                 </button>
                 <button
                   onClick={() => createContactsInputRef.current?.click()}
@@ -261,6 +289,15 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
                 ref={createContextInputRef}
                 type="file"
                 accept=".txt,.md,.pdf,.csv"
+                onChange={(event) => {
+                  void handleCreateKnowledgeUpload(event, 'context');
+                }}
+                className="hidden"
+              />
+              <input
+                ref={createBusinessPlanInputRef}
+                type="file"
+                accept=".pdf"
                 onChange={(event) => {
                   void handleCreateKnowledgeUpload(event, 'context');
                 }}
@@ -301,7 +338,7 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
             <textarea
               value={joinCode}
               onChange={(e) => setJoinCode(e.target.value)}
-              placeholder="LBRG1...."
+              placeholder="12345-LBRG1...."
               className="w-full min-h-[180px] bg-slate-950 border border-slate-700 rounded p-2.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-blue-500 resize-y"
             />
             <button
@@ -373,11 +410,27 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
                   <Users size={18} className="text-blue-400" />
                   <h4 className="text-white font-semibold">Invites</h4>
                 </div>
+                <div className="rounded border border-slate-700 bg-slate-950 p-3 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[11px] uppercase tracking-wider text-slate-500">5-Digit Invite PIN</p>
+                    <p className="text-2xl font-mono tracking-[0.3em] text-emerald-300">{organization.invitePin || '-----'}</p>
+                  </div>
+                  <button
+                    onClick={handleCopyPin}
+                    className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-medium inline-flex items-center gap-1.5"
+                  >
+                    <KeyRound size={12} />
+                    {copiedPin ? 'PIN Copied' : 'Copy PIN'}
+                  </button>
+                </div>
                 <textarea
                   readOnly
                   value={organization.inviteCode}
                   className="w-full min-h-[140px] bg-slate-950 border border-slate-700 rounded p-2.5 text-xs font-mono text-slate-300"
                 />
+                <p className="text-xs text-slate-400">
+                  Share the full invite code. It now starts with your 5-digit PIN for quick human confirmation.
+                </p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <button
                     onClick={onGenerateInvite}
@@ -399,9 +452,9 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
               <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
                 <h4 className="text-white font-semibold">Organization Documents</h4>
                 <p className="text-sm text-slate-400">
-                  Upload files directly into shared thesis/context, or push your contact CSV into the org universe.
+                  Upload files directly into shared thesis/context, including a full business plan PDF.
                 </p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                   <button
                     onClick={() => orgThesisInputRef.current?.click()}
                     disabled={isUploading}
@@ -417,6 +470,14 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
                   >
                     {isUploading ? <Loader2 size={12} className="animate-spin" /> : <FileUp size={12} />}
                     Context Doc
+                  </button>
+                  <button
+                    onClick={() => orgBusinessPlanInputRef.current?.click()}
+                    disabled={isUploading}
+                    className="py-2.5 text-xs bg-emerald-700 hover:bg-emerald-600 disabled:bg-emerald-700/60 text-white rounded border border-emerald-500/30 transition-colors inline-flex items-center justify-center gap-1.5"
+                  >
+                    {isUploading ? <Loader2 size={12} className="animate-spin" /> : <FileUp size={12} />}
+                    Business Plan PDF
                   </button>
                   <button
                     onClick={() => orgContactsInputRef.current?.click()}
@@ -440,6 +501,15 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
                   ref={orgContextInputRef}
                   type="file"
                   accept=".txt,.md,.pdf,.csv"
+                  onChange={(event) => {
+                    void handleOrganizationKnowledgeUpload(event, 'context');
+                  }}
+                  className="hidden"
+                />
+                <input
+                  ref={orgBusinessPlanInputRef}
+                  type="file"
+                  accept=".pdf"
                   onChange={(event) => {
                     void handleOrganizationKnowledgeUpload(event, 'context');
                   }}

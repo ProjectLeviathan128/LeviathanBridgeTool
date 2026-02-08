@@ -107,9 +107,11 @@ describe('organizationService', () => {
     });
 
     const code = createOrganizationInviteCode(organization, owner);
+    expect(code).toMatch(/^\d{5}-LBRG1\./);
     const parsed = parseOrganizationInviteCode(code);
     expect(parsed.ok).toBe(true);
     expect(parsed.payload?.org.id).toBe(organization.id);
+    expect(parsed.payload?.pin).toMatch(/^\d{5}$/);
 
     const joined = organizationFromInvite(parsed.payload!, {
       userId: 'u-member',
@@ -139,6 +141,12 @@ describe('organizationService', () => {
     const tampered = `${code}x`;
     const parsed = parseOrganizationInviteCode(tampered);
     expect(parsed.ok).toBe(false);
+  });
+
+  it('rejects pin-only invite input', () => {
+    const parsed = parseOrganizationInviteCode('12345');
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error?.toLowerCase()).toContain('full invite code');
   });
 
   it('round-trips organization sync package', () => {

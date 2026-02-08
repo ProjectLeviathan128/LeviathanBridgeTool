@@ -22,7 +22,9 @@ import {
 } from './services/storageService';
 import { debugError, debugInfo, debugWarn } from './services/debugService';
 import {
+  INTRO_REQUEST_LIST,
   createOrganization,
+  createInvitePin,
   createOrganizationInviteCode,
   createOrganizationSyncPackage,
   dedupeContacts,
@@ -79,6 +81,34 @@ function appendOrganizationDocument(existing: string, fileName: string, text: st
   const section = `[${fileName}]\n${text.trim()}`;
   if (!existing.trim()) return section;
   return `${existing.trim()}\n\n${section}`;
+}
+
+function normalizeListValues(lists: string[] | undefined): string[] {
+  return [...new Set((lists || []).map((list) => list.trim()).filter(Boolean))];
+}
+
+function setContactIntroRequest(contact: Contact, requested: boolean): Contact {
+  const normalizedLists = normalizeListValues(contact.lists);
+  const nextLists = requested
+    ? [...new Set([...normalizedLists, INTRO_REQUEST_LIST])]
+    : normalizedLists.filter((list) => list !== INTRO_REQUEST_LIST);
+
+  return {
+    ...contact,
+    lists: nextLists,
+    introRequested: requested,
+    introRequestedAt: requested ? (contact.introRequestedAt || new Date().toISOString()) : undefined,
+  };
+}
+
+function normalizeContactCollaboration(contact: Contact): Contact {
+  const normalizedLists = normalizeListValues(contact.lists);
+  const hasIntroList = normalizedLists.includes(INTRO_REQUEST_LIST);
+  const introRequested = Boolean(contact.introRequested || hasIntroList);
+  return setContactIntroRequest(
+    { ...contact, lists: normalizedLists, introRequested, introRequestedAt: contact.introRequestedAt },
+    introRequested
+  );
 }
 
 const App: React.FC = () => {
@@ -335,6 +365,19 @@ const App: React.FC = () => {
     setOrganization(prev => (prev ? upsertOrganizationMember(prev, toOrganizationMember(user, role)) : prev));
   }, [user, organization]);
 
+  useEffect(() => {
+    if (!user || !organization || organization.invitePin) return;
+    const role: 'owner' | 'member' = organization.ownerId === (user.uuid || user.username) ? 'owner' : 'member';
+    const inviter = toOrganizationMember(user, role);
+    const orgWithPin: Organization = {
+      ...organization,
+      invitePin: createInvitePin(),
+      updatedAt: Date.now()
+    };
+    orgWithPin.inviteCode = createOrganizationInviteCode(orgWithPin, inviter);
+    setOrganization(orgWithPin);
+  }, [user, organization]);
+
   // Force sync to cloud
   const handleForceSync = async () => {
     if (!user) return;
@@ -424,8 +467,9 @@ const App: React.FC = () => {
   };
 
   const handleUpdateContact = (updated: Contact) => {
-    setContacts(prev => prev.map(c => c.id === updated.id ? updated : c));
-    setSelectedContact(updated);
+    const normalized = normalizeContactCollaboration(updated);
+    setContacts(prev => prev.map(c => c.id === normalized.id ? normalized : c));
+    setSelectedContact(normalized);
   };
 
   const handleDeleteContacts = (contactIds: string[]) => {
@@ -454,17 +498,16 @@ const App: React.FC = () => {
     ));
   };
 
-  const handleSetContactLists = (contactId: string, lists: string[]) => {
-    const normalized = [...new Set(lists.map(list => list.trim()).filter(Boolean))];
+  const handleToggleIntroRequest = (contactId: string) => {
     setContacts(prev => prev.map(contact => (
       contact.id === contactId
-        ? { ...contact, lists: normalized }
+        ? setContactIntroRequest(contact, !contact.introRequested)
         : contact
     )));
 
     setSelectedContact(prev => (
       prev && prev.id === contactId
-        ? { ...prev, lists: normalized }
+        ? setContactIntroRequest(prev, !prev.introRequested)
         : prev
     ));
   };
@@ -477,9 +520,10 @@ const App: React.FC = () => {
   };
 
   const handleBatchUpdateContacts = (updates: Contact[]) => {
+    const normalizedUpdates = updates.map(normalizeContactCollaboration);
     setContacts(prev => {
       const newContacts = [...prev];
-      updates.forEach(u => {
+      normalizedUpdates.forEach(u => {
         const idx = newContacts.findIndex(c => c.id === u.id);
         if (idx > -1) newContacts[idx] = u;
       });
@@ -487,13 +531,14 @@ const App: React.FC = () => {
     });
 
     if (selectedContact) {
-      const updatedSelected = updates.find(update => update.id === selectedContact.id);
+      const updatedSelected = normalizedUpdates.find(update => update.id === selectedContact.id);
       if (updatedSelected) setSelectedContact(updatedSelected);
     }
   };
 
   const handleIngestContacts = (newContacts: Contact[]) => {
-    const mergeResult = mergeContactsWithDedupe(contacts, newContacts);
+    const normalizedContacts = newContacts.map(normalizeContactCollaboration);
+    const mergeResult = mergeContactsWithDedupe(contacts, normalizedContacts);
     setContacts(mergeResult.contacts);
     setActiveTab('contacts'); // Auto-switch to list view
     if (mergeResult.duplicates > 0) {
@@ -502,7 +547,7 @@ const App: React.FC = () => {
       );
     }
     debugInfo('ingestion', 'Contacts ingested into universe.', {
-      imported: newContacts.length,
+      imported: normalizedContacts.length,
       added: mergeResult.added,
       duplicates: mergeResult.duplicates,
       merged: mergeResult.merged
@@ -588,7 +633,7 @@ const App: React.FC = () => {
 
     setOrganization(nextOrg);
     syncOrganizationContext(nextOrg);
-    setOrgMessage(`Created organization "${nextOrg.name}".`);
+    setOrgMessage(`Created organization "${nextOrg.name}"${nextOrg.invitePin ? ` (PIN ${nextOrg.invitePin})` : ''}.`);
     debugInfo('organization', 'Organization created.', {
       id: nextOrg.id,
       name: nextOrg.name
@@ -612,7 +657,7 @@ const App: React.FC = () => {
     const nextOrg = organizationFromInvite(parsed.payload, joiningMember);
     setOrganization(nextOrg);
     syncOrganizationContext(nextOrg);
-    setOrgMessage(`Joined organization "${nextOrg.name}".`);
+    setOrgMessage(`Joined "${nextOrg.name}". Organization thesis/context is now shared. Contacts merge when you import a package or CSV and run dedupe.`);
     debugInfo('organization', 'Organization joined via invite.', {
       id: nextOrg.id,
       member: joiningMember.userId
@@ -641,14 +686,19 @@ const App: React.FC = () => {
 
     const role: 'owner' | 'member' = organization.ownerId === (user.uuid || user.username) ? 'owner' : 'member';
     const inviter = toOrganizationMember(user, role);
-    const nextOrg: Organization = {
+    const invitePin = organization.invitePin || createInvitePin();
+    const orgWithPin: Organization = {
       ...organization,
-      inviteCode: createOrganizationInviteCode(organization, inviter),
+      invitePin
+    };
+    const nextOrg: Organization = {
+      ...orgWithPin,
+      inviteCode: createOrganizationInviteCode(orgWithPin, inviter),
       updatedAt: Date.now()
     };
 
     setOrganization(nextOrg);
-    setOrgMessage('Generated a fresh invite code.');
+    setOrgMessage(`Generated a fresh invite code${nextOrg.invitePin ? ` (PIN ${nextOrg.invitePin})` : ''}.`);
     debugInfo('organization', 'Invite regenerated.', {
       id: nextOrg.id,
       inviter: inviter.userId
@@ -674,7 +724,7 @@ const App: React.FC = () => {
       const batchId = `org-ing-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const sourceLabel = organization ? `${organization.name} (${file.name})` : file.name;
       const preparedContacts = parsedContacts.map((contact) => ({
-        ...contact,
+        ...normalizeContactCollaboration(contact),
         ingestionMeta: {
           ...contact.ingestionMeta,
           sourceLabel,
@@ -881,6 +931,7 @@ const App: React.FC = () => {
             onSelectContact={setSelectedContact}
             onBatchUpdateContacts={handleBatchUpdateContacts}
             onDeleteContacts={handleDeleteContacts}
+            onToggleIntroRequest={handleToggleIntroRequest}
           />
         );
       case 'upload':
@@ -1068,7 +1119,7 @@ const App: React.FC = () => {
             onUpdate={handleUpdateContact}
             onDelete={handleDeleteContact}
             onToggleFlag={handleToggleTeamFlag}
-            onSetLists={handleSetContactLists}
+            onToggleIntroRequest={handleToggleIntroRequest}
             settings={settings}
           />
         )}

@@ -9,6 +9,8 @@ import {
 import { extractLinkedInUrlFromContact } from './enrichmentGuards';
 
 const INVITE_PREFIX = 'LBRG1';
+const INVITE_PIN_LENGTH = 5;
+export const INTRO_REQUEST_LIST = 'intro-requests';
 
 function randomToken(length: number): string {
   const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -17,6 +19,23 @@ function randomToken(length: number): string {
     output += alphabet[Math.floor(Math.random() * alphabet.length)];
   }
   return output;
+}
+
+function randomDigits(length: number): string {
+  let output = '';
+  for (let i = 0; i < length; i += 1) {
+    output += Math.floor(Math.random() * 10).toString();
+  }
+  return output;
+}
+
+export function createInvitePin(): string {
+  return randomDigits(INVITE_PIN_LENGTH);
+}
+
+function normalizeInvitePin(pin?: string): string {
+  if (pin && /^\d{5}$/.test(pin)) return pin;
+  return createInvitePin();
 }
 
 function toBase64Url(value: string): string {
@@ -137,6 +156,27 @@ export function mergeContactRecords(primary: Contact, duplicate: Contact): Conta
     return `${first}\n\n---\n\n${second}`;
   })();
 
+  const normalizedLists = [...new Set(combinedLists.map((list) => list.trim()).filter(Boolean))];
+  const introRequested = Boolean(
+    primary.introRequested ||
+    duplicate.introRequested ||
+    normalizedLists.includes(INTRO_REQUEST_LIST)
+  );
+  const introRequestedAt = [primary.introRequestedAt, duplicate.introRequestedAt]
+    .filter((value): value is string => Boolean(value))
+    .sort()[0];
+  const lists = introRequested
+    ? [...new Set([...normalizedLists, INTRO_REQUEST_LIST])]
+    : normalizedLists.filter((list) => list !== INTRO_REQUEST_LIST);
+  const outreachDrafts: NonNullable<Contact['outreachDrafts']> = [];
+  [...(primary.outreachDrafts || []), ...(duplicate.outreachDrafts || [])].forEach((draft) => {
+    const key = `${draft.channel}|${draft.senderId}|${draft.generatedAt}`;
+    const exists = outreachDrafts.some(
+      (existing) => `${existing.channel}|${existing.senderId}|${existing.generatedAt}` === key
+    );
+    if (!exists) outreachDrafts.push(draft);
+  });
+
   return {
     ...primary,
     name: bestString(primary.name, duplicate.name),
@@ -144,8 +184,11 @@ export function mergeContactRecords(primary: Contact, duplicate: Contact): Conta
     location: bestString(primary.location, duplicate.location),
     source: bestString(primary.source, duplicate.source),
     tags: [...new Set(combinedTags.map((tag) => tag.trim()).filter(Boolean))],
-    lists: [...new Set(combinedLists.map((list) => list.trim()).filter(Boolean))],
+    lists,
     teamFlagged: Boolean(primary.teamFlagged || duplicate.teamFlagged),
+    introRequested,
+    introRequestedAt: introRequested ? (introRequestedAt || new Date().toISOString()) : undefined,
+    outreachDrafts: outreachDrafts.slice(0, 8),
     rawText: mergedRawText,
     status: bestStatus(primary.status, duplicate.status),
     ingestionMeta: {
@@ -228,6 +271,7 @@ export function createOrganization(args: {
   owner: OrganizationMember;
 }): Organization {
   const now = Date.now();
+  const invitePin = createInvitePin();
   const organization: Organization = {
     id: `org-${now}-${randomToken(6)}`,
     name: cleanText(args.name),
@@ -240,6 +284,7 @@ export function createOrganization(args: {
       joinedAt: args.owner.joinedAt || new Date(now).toISOString(),
     }],
     inviteCode: '',
+    invitePin,
     createdAt: now,
     updatedAt: now,
   };
@@ -271,8 +316,10 @@ export function createOrganizationInviteCode(
   expiresInDays = 14
 ): string {
   const now = Date.now();
+  const invitePin = normalizeInvitePin(organization.invitePin);
   const payload: OrganizationInvitePayload = {
     v: 1,
+    pin: invitePin,
     org: {
       id: organization.id,
       name: organization.name,
@@ -294,7 +341,7 @@ export function createOrganizationInviteCode(
 
   const encodedPayload = toBase64Url(JSON.stringify(payload));
   const signature = checksum(encodedPayload);
-  return `${INVITE_PREFIX}.${encodedPayload}.${signature}`;
+  return `${invitePin}-${INVITE_PREFIX}.${encodedPayload}.${signature}`;
 }
 
 export function parseOrganizationInviteCode(code: string): {
@@ -303,13 +350,32 @@ export function parseOrganizationInviteCode(code: string): {
   error?: string;
 } {
   const trimmed = code.trim();
-  const parts = trimmed.split('.');
-  if (parts.length !== 3 || parts[0] !== INVITE_PREFIX) {
+  if (/^\d{5}$/.test(trimmed)) {
+    return {
+      ok: false,
+      error: 'Quick PIN alone is not enough. Ask your teammate to copy the full invite code.',
+    };
+  }
+
+  let pinPrefix: string | undefined;
+  let token = trimmed;
+
+  const prefixedMatch = trimmed.match(/^(\d{5})-(LBRG1\.[A-Za-z0-9_-]+\.[a-z0-9]+)$/);
+  if (prefixedMatch) {
+    pinPrefix = prefixedMatch[1];
+    token = prefixedMatch[2];
+  }
+
+  const plainMatch = token.match(/^(LBRG1\.[A-Za-z0-9_-]+\.[a-z0-9]+)$/);
+  if (!plainMatch) {
     return { ok: false, error: 'Invalid invite format.' };
   }
 
-  const encodedPayload = parts[1];
-  const incomingSignature = parts[2];
+  const [prefix, encodedPayload, incomingSignature] = plainMatch[1].split('.');
+  if (prefix !== INVITE_PREFIX || !encodedPayload || !incomingSignature) {
+    return { ok: false, error: 'Invalid invite format.' };
+  }
+
   if (checksum(encodedPayload) !== incomingSignature) {
     return { ok: false, error: 'Invite checksum mismatch. The code may be corrupted.' };
   }
@@ -318,6 +384,9 @@ export function parseOrganizationInviteCode(code: string): {
     const payload = JSON.parse(fromBase64Url(encodedPayload)) as OrganizationInvitePayload;
     if (payload.v !== 1) return { ok: false, error: 'Unsupported invite version.' };
     if (Date.now() > payload.expiresAt) return { ok: false, error: 'Invite expired.' };
+    if (pinPrefix && payload.pin && pinPrefix !== payload.pin) {
+      return { ok: false, error: 'Invite PIN mismatch.' };
+    }
     return { ok: true, payload };
   } catch {
     return { ok: false, error: 'Failed to decode invite payload.' };
@@ -328,6 +397,7 @@ export function organizationFromInvite(
   payload: OrganizationInvitePayload,
   joiningMember: OrganizationMember
 ): Organization {
+  const invitePin = normalizeInvitePin(payload.pin);
   const ownerMember: OrganizationMember = {
     userId: payload.inviter.userId,
     username: payload.inviter.username,
@@ -344,6 +414,7 @@ export function organizationFromInvite(
     ownerId: payload.org.ownerId,
     members: [ownerMember],
     inviteCode: '',
+    invitePin,
     createdAt: payload.org.createdAt,
     updatedAt: Date.now(),
   };

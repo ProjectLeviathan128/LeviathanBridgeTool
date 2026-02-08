@@ -54,6 +54,19 @@ export interface EnrichmentData {
   collisionRisk: boolean;
 }
 
+export type OutreachChannel = 'linkedin' | 'email';
+export type OutreachSenderId = 'matthew' | 'nathan';
+
+export interface OutreachDraft {
+  channel: OutreachChannel;
+  senderId: OutreachSenderId;
+  senderName: string;
+  senderTitle: string;
+  subject?: string;
+  message: string;
+  generatedAt: string;
+}
+
 export interface Contact {
   id: string;
   name: string;
@@ -63,6 +76,9 @@ export interface Contact {
   tags?: string[];
   lists?: string[]; // user-defined collaborative lists (e.g., "Q1 Targets")
   teamFlagged?: boolean; // manual team flag for follow-up
+  introRequested?: boolean; // mark this contact for team intro workflow
+  introRequestedAt?: string; // timestamp when intro request was created
+  outreachDrafts?: OutreachDraft[];
   rawText?: string;
   status: 'New' | 'Enriched' | 'Review Needed' | 'Discarded';
 
@@ -148,6 +164,7 @@ export interface Organization {
   ownerId: string;
   members: OrganizationMember[];
   inviteCode: string;
+  invitePin?: string; // 5-digit quick reference PIN shown in UI
   createdAt: number;
   updatedAt: number;
 }
@@ -162,6 +179,7 @@ export interface OrganizationMember {
 
 export interface OrganizationInvitePayload {
   v: 1;
+  pin?: string;
   org: {
     id: string;
     name: string;

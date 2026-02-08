@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Contact, ScoreProvenance, AppSettings } from '../types';
+import { Contact, ScoreProvenance, AppSettings, OutreachChannel, OutreachSenderId } from '../types';
 import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from 'recharts';
 import { analyzeContactWithGemini } from '../services/geminiService';
 import { assessEnrichmentQuality } from '../services/enrichmentGuards';
 import { debugError, debugWarn, requestDebugPanelOpen } from '../services/debugService';
-import { AlertOctagon, Brain, X, Loader2, ShieldAlert, Fingerprint, History, Info, ExternalLink, RefreshCw, Flag, Trash2, Save } from 'lucide-react';
+import { generateOutreachDraft, getSenderProfile } from '../services/outreachService';
+import { AlertOctagon, Brain, X, Loader2, ShieldAlert, Fingerprint, History, Info, ExternalLink, RefreshCw, Flag, Trash2, Copy, Mail, MessageSquareText, Sparkles } from 'lucide-react';
 
 interface ContactDetailProps {
   contact: Contact;
@@ -12,7 +13,7 @@ interface ContactDetailProps {
   onUpdate: (updatedContact: Contact) => void;
   onDelete: (contactId: string) => void;
   onToggleFlag: (contactId: string) => void;
-  onSetLists: (contactId: string, lists: string[]) => void;
+  onToggleIntroRequest: (contactId: string) => void;
   settings: AppSettings;
 }
 
@@ -22,16 +23,30 @@ const ContactDetail: React.FC<ContactDetailProps> = ({
   onUpdate,
   onDelete,
   onToggleFlag,
-  onSetLists,
+  onToggleIntroRequest,
   settings
 }) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isGeneratingOutreach, setIsGeneratingOutreach] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [listDraft, setListDraft] = useState('');
+  const [selectedChannel, setSelectedChannel] = useState<OutreachChannel>('linkedin');
+  const [selectedSender, setSelectedSender] = useState<OutreachSenderId>('nathan');
+  const [generatedCopy, setGeneratedCopy] = useState('');
+  const [generatedSubject, setGeneratedSubject] = useState('');
+  const [copiedOutreach, setCopiedOutreach] = useState(false);
 
   useEffect(() => {
-    setListDraft((contact.lists || []).join(', '));
-  }, [contact.id, contact.lists]);
+    const latestDraft = contact.outreachDrafts?.[0];
+    if (latestDraft) {
+      setSelectedChannel(latestDraft.channel);
+      setSelectedSender(latestDraft.senderId);
+      setGeneratedCopy(latestDraft.message);
+      setGeneratedSubject(latestDraft.subject || '');
+      return;
+    }
+    setGeneratedCopy('');
+    setGeneratedSubject('');
+  }, [contact.id, contact.outreachDrafts]);
 
   const handleEnrich = async () => {
     setIsAnalyzing(true);
@@ -71,18 +86,55 @@ const ContactDetail: React.FC<ContactDetailProps> = ({
     }
   };
 
-  const handleSaveLists = () => {
-    const lists = listDraft
-      .split(',')
-      .map(list => list.trim())
-      .filter(Boolean);
-    onSetLists(contact.id, lists);
-  };
-
   const handleDelete = () => {
     if (!window.confirm(`Delete ${contact.name}? This cannot be undone.`)) return;
     onDelete(contact.id);
     onClose();
+  };
+
+  const handleGenerateOutreach = async () => {
+    setIsGeneratingOutreach(true);
+    try {
+      const draft = await generateOutreachDraft(contact, selectedChannel, selectedSender);
+      const nextDrafts = [
+        draft,
+        ...(contact.outreachDrafts || []).filter(
+          (existing) => !(existing.channel === draft.channel && existing.senderId === draft.senderId)
+        ),
+      ].slice(0, 8);
+
+      setGeneratedCopy(draft.message);
+      setGeneratedSubject(draft.subject || '');
+      onUpdate({
+        ...contact,
+        outreachDrafts: nextDrafts,
+      });
+    } catch (err) {
+      debugError('contact.detail', 'Outreach generation failed.', {
+        contactId: contact.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      setError('Failed to generate outreach draft. Try again.');
+    } finally {
+      setIsGeneratingOutreach(false);
+    }
+  };
+
+  const handleCopyOutreach = async () => {
+    const text = selectedChannel === 'email' && generatedSubject.trim()
+      ? `Subject: ${generatedSubject.trim()}\n\n${generatedCopy.trim()}`
+      : generatedCopy.trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedOutreach(true);
+      setTimeout(() => setCopiedOutreach(false), 1200);
+    } catch (err) {
+      debugWarn('contact.detail', 'Clipboard copy failed.', {
+        contactId: contact.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   };
 
   const radarData = contact.scores ? [
@@ -160,6 +212,12 @@ const ContactDetail: React.FC<ContactDetailProps> = ({
                   Team Flagged
                 </span>
               )}
+              {contact.introRequested && (
+                <span className="text-xs px-2 py-1 rounded border bg-emerald-900/20 text-emerald-300 border-emerald-700/50 uppercase tracking-wider inline-flex items-center gap-1">
+                  <MessageSquareText size={11} />
+                  Intro Requested
+                </span>
+              )}
             </div>
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -174,6 +232,17 @@ const ContactDetail: React.FC<ContactDetailProps> = ({
             </div>
 
             <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                onClick={() => onToggleIntroRequest(contact.id)}
+                className={`px-3 py-1.5 text-xs rounded border transition-colors inline-flex items-center gap-1.5 ${
+                  contact.introRequested
+                    ? 'text-emerald-300 border-emerald-700/60 bg-emerald-900/20 hover:bg-emerald-900/30'
+                    : 'text-slate-300 border-slate-700 hover:border-emerald-700/60 hover:text-emerald-300'
+                }`}
+              >
+                <MessageSquareText size={12} />
+                {contact.introRequested ? 'Remove Intro Request' : 'Request Intro'}
+              </button>
               <button
                 onClick={() => onToggleFlag(contact.id)}
                 className={`px-3 py-1.5 text-xs rounded border transition-colors inline-flex items-center gap-1.5 ${
@@ -357,32 +426,111 @@ const ContactDetail: React.FC<ContactDetailProps> = ({
             <div className="space-y-6">
               <div className="bg-slate-800 rounded-lg p-5 border border-slate-700">
                 <h4 className="text-white font-semibold mb-3 flex items-center gap-2">
-                  <Flag className="text-amber-400" size={16} />
-                  Team Collaboration
+                  <Sparkles className="text-blue-400" size={16} />
+                  Follow-Up Draft Engine
                 </h4>
                 <p className="text-xs text-slate-400 mb-3">
-                  Use shared flags and lists so your cofounder sees priority changes immediately.
+                  Generate outreach in one click from Leviathan thesis + this contact profile.
                 </p>
-                <div className="space-y-2">
-                  <label className="text-[11px] uppercase tracking-wider text-slate-500">Lists (comma separated)</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      value={listDraft}
-                      onChange={(e) => setListDraft(e.target.value)}
-                      placeholder="e.g. q1-targets, warm-intros"
-                      className="flex-1 bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleSaveLists}
-                      className="px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium inline-flex items-center gap-1"
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+                  <div>
+                    <label className="text-[11px] uppercase tracking-wider text-slate-500">Sender</label>
+                    <select
+                      value={selectedSender}
+                      onChange={(event) => setSelectedSender(event.target.value as OutreachSenderId)}
+                      className="mt-1 w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
                     >
-                      <Save size={12} />
-                      Save
-                    </button>
+                      <option value="nathan">Nathan Krajewski (Founder)</option>
+                      <option value="matthew">Matthew Fortes (CoFounder)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[11px] uppercase tracking-wider text-slate-500">Channel</label>
+                    <div className="mt-1 grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedChannel('linkedin')}
+                        className={`px-3 py-2 rounded border text-xs inline-flex items-center justify-center gap-1 ${
+                          selectedChannel === 'linkedin'
+                            ? 'bg-blue-600 border-blue-500 text-white'
+                            : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800'
+                        }`}
+                      >
+                        <MessageSquareText size={12} />
+                        LinkedIn
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedChannel('email')}
+                        className={`px-3 py-2 rounded border text-xs inline-flex items-center justify-center gap-1 ${
+                          selectedChannel === 'email'
+                            ? 'bg-blue-600 border-blue-500 text-white'
+                            : 'bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800'
+                        }`}
+                      >
+                        <Mail size={12} />
+                        Email
+                      </button>
+                    </div>
                   </div>
                 </div>
+
+                <div className="flex items-center gap-2 mb-3">
+                  <button
+                    type="button"
+                    onClick={handleGenerateOutreach}
+                    disabled={isGeneratingOutreach}
+                    className="px-3 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 text-white rounded text-xs font-medium inline-flex items-center gap-1.5"
+                  >
+                    {isGeneratingOutreach ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                    Generate Draft
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCopyOutreach}
+                    disabled={!generatedCopy.trim()}
+                    className="px-3 py-2 bg-slate-900 border border-slate-700 hover:bg-slate-800 disabled:opacity-60 text-slate-200 rounded text-xs font-medium inline-flex items-center gap-1.5"
+                  >
+                    <Copy size={12} />
+                    {copiedOutreach ? 'Copied' : 'Copy'}
+                  </button>
+                  {selectedChannel === 'linkedin' && generatedCopy.trim() && (
+                    <span className={`text-[11px] ${generatedCopy.length <= 300 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {generatedCopy.length}/300
+                    </span>
+                  )}
+                </div>
+
+                {selectedChannel === 'email' && (
+                  <input
+                    type="text"
+                    value={generatedSubject}
+                    onChange={(event) => setGeneratedSubject(event.target.value)}
+                    placeholder="Email subject"
+                    className="w-full mb-2 bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+                  />
+                )}
+
+                <textarea
+                  value={generatedCopy}
+                  onChange={(event) => setGeneratedCopy(event.target.value)}
+                  placeholder={selectedChannel === 'linkedin' ? 'LinkedIn draft appears here...' : 'Email draft appears here...'}
+                  className="w-full min-h-[170px] bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 resize-y"
+                />
+                <p className="text-[11px] text-slate-500 mt-1">
+                  {selectedChannel === 'linkedin' ? 'LinkedIn stays under 300 characters.' : 'Email can be longer for higher-conviction outreach.'}
+                </p>
+                <p className="text-[11px] text-slate-500 mt-2">
+                  Drafting as {getSenderProfile(selectedSender).name} ({getSenderProfile(selectedSender).title}).
+                </p>
+                {contact.introRequestedAt && (
+                  <p className="text-[11px] text-emerald-400 mt-1">
+                    In intro queue since {new Date(contact.introRequestedAt).toLocaleString()}
+                  </p>
+                )}
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Intro queue appears in Contacts via the Intro Queue filter.
+                </p>
               </div>
 
               {contact.enrichment ? (
