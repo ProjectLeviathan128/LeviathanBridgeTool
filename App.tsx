@@ -753,6 +753,7 @@ const App: React.FC = () => {
       owner: ownerMember
     });
 
+    orgWorkspaceLoadedRef.current = null;
     setOrganization(nextOrg);
     syncOrganizationContext(nextOrg);
     setOrgMessage(`Created organization "${nextOrg.name}"${nextOrg.invitePin ? ` (PIN ${nextOrg.invitePin})` : ''}.`);
@@ -777,6 +778,7 @@ const App: React.FC = () => {
     const joiningMember = toOrganizationMember(user, 'member');
 
     const nextOrg = organizationFromInvite(parsed.payload, joiningMember);
+    orgWorkspaceLoadedRef.current = null;
     setOrganization(nextOrg);
     syncOrganizationContext(nextOrg);
     setOrgMessage(`Joined "${nextOrg.name}". Organization thesis/context is now shared. Contacts merge when you import a package or CSV and run dedupe.`);
@@ -967,6 +969,7 @@ const App: React.FC = () => {
       const mergeResult = mergeContactsWithDedupe(contacts, incoming.contacts);
       setContacts(mergeResult.contacts);
       setSelectedContact(prev => (prev ? mergeResult.contacts.find(c => c.id === prev.id) || null : null));
+      orgWorkspaceLoadedRef.current = null;
       setOrganization(nextOrganization);
       syncOrganizationContext(nextOrganization);
 
