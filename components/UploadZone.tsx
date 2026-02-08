@@ -1,16 +1,18 @@
 import React, { useState, useRef } from 'react';
-import { UploadCloud, CheckCircle, Loader2, Plus, Terminal, FileText, Database, Shield } from 'lucide-react';
+import { UploadCloud, CheckCircle, Loader2, Plus, Terminal, FileText, Database, Shield, X } from 'lucide-react';
 import { bridgeMemory } from '../services/bridgeMemory';
+import { debugError, debugInfo, debugWarn } from '../services/debugService';
 import { Contact, IngestionHistoryItem } from '../types';
 
 interface UploadZoneProps {
     onIngestContacts: (newContacts: Contact[]) => void;
     onThesisUpdate: () => void;
     history: IngestionHistoryItem[];
-    onAddHistory: (name: string, type: string) => void;
+    onAddHistory: (name: string, type: string, metadata?: { batchId?: string; recordCount?: number }) => void;
+    onDeleteHistoryItem: (item: IngestionHistoryItem) => void;
 }
 
-const UploadZone: React.FC<UploadZoneProps> = ({ onIngestContacts, onThesisUpdate, history, onAddHistory }) => {
+const UploadZone: React.FC<UploadZoneProps> = ({ onIngestContacts, onThesisUpdate, history, onAddHistory, onDeleteHistoryItem }) => {
     const [isProcessing, setIsProcessing] = useState(false);
 
     // Separate states for Manual Entry
@@ -35,22 +37,41 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onIngestContacts, onThesisUpdat
         const file = e.target.files?.[0];
         if (!file) return;
 
+        debugInfo('upload', 'Contact file upload started.', { fileName: file.name, size: file.size });
         setIsProcessing(true);
         try {
             // Import dynamically to avoid circular dependencies if any, though not expected here
             const { parseAndMapCSV } = await import('../services/csvService');
 
-            const newContacts = await parseAndMapCSV(file);
+            const parsedContacts = await parseAndMapCSV(file);
+            const batchId = `ing-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const newContacts = parsedContacts.map((contact) => ({
+                ...contact,
+                ingestionMeta: {
+                    ...contact.ingestionMeta,
+                    batchId
+                }
+            }));
 
             if (newContacts.length > 0) {
                 onIngestContacts(newContacts);
-                onAddHistory(file.name, 'Contacts');
+                onAddHistory(file.name, 'Contacts', {
+                    batchId,
+                    recordCount: newContacts.length
+                });
+                debugInfo('upload', 'Contact file processed successfully.', {
+                    fileName: file.name,
+                    count: newContacts.length,
+                    batchId
+                });
             } else {
                 alert("No valid contacts found. Please check CSV format.");
+                debugWarn('upload', 'Contact file had no valid contacts.', { fileName: file.name });
             }
         } catch (err) {
             console.error(err);
             alert("Failed to parse contact file: " + (err instanceof Error ? err.message : String(err)));
+            debugError('upload', 'Contact file processing failed.', err);
         } finally {
             setIsProcessing(false);
             if (contactInputRef.current) contactInputRef.current.value = '';
@@ -61,11 +82,13 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onIngestContacts, onThesisUpdat
         const file = e.target.files?.[0];
         if (!file) return;
 
+        debugInfo('upload', 'Knowledge file upload started.', { fileName: file.name, type });
         setIsProcessing(true);
         processFile(file, (text) => {
             bridgeMemory.ingestThesisDocument(text, file.name, type);
             onAddHistory(file.name, type === 'thesis' ? 'Thesis' : 'Context');
             onThesisUpdate();
+            debugInfo('upload', 'Knowledge file processed.', { fileName: file.name, type });
             setIsProcessing(false);
             if (type === 'thesis' && thesisInputRef.current) thesisInputRef.current.value = '';
             if (type === 'context' && contextInputRef.current) contextInputRef.current.value = '';
@@ -75,6 +98,7 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onIngestContacts, onThesisUpdat
     const handleManualSubmit = (text: string, type: 'thesis' | 'context') => {
         if (!text.trim()) return;
         setIsProcessing(true);
+        debugInfo('upload', 'Manual knowledge entry submitted.', { type, chars: text.trim().length });
 
         // Simulate slight network delay
         setTimeout(() => {
@@ -243,12 +267,36 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onIngestContacts, onThesisUpdat
                                 </div>
                                 <div>
                                     <p className="text-sm text-slate-200 font-medium">{item.name}</p>
-                                    <p className="text-xs text-slate-500">Type: {item.type} • {item.timestamp}</p>
+                                    <p className="text-xs text-slate-500">
+                                        Type: {item.type} • {item.timestamp}
+                                        {item.type === 'Contacts' && typeof item.recordCount === 'number' ? ` • ${item.recordCount} contacts` : ''}
+                                    </p>
                                 </div>
                             </div>
-                            <div className="flex items-center gap-2 text-emerald-500 text-xs">
-                                <CheckCircle size={14} />
-                                {item.status}
+                            <div className="flex items-center gap-3">
+                                <div className="flex items-center gap-2 text-emerald-500 text-xs">
+                                    <CheckCircle size={14} />
+                                    {item.status}
+                                </div>
+                                <button
+                                    onClick={() => {
+                                        const message = item.type === 'Contacts'
+                                            ? `Delete "${item.name}" and remove all imported contacts from your universe? This cannot be undone.`
+                                            : `Remove "${item.name}" from ingestion history?`;
+                                        if (window.confirm(message)) {
+                                            debugWarn('upload', 'Delete action confirmed from ingestion history.', {
+                                                itemId: item.id,
+                                                type: item.type,
+                                                name: item.name
+                                            });
+                                            onDeleteHistoryItem(item);
+                                        }
+                                    }}
+                                    className="p-1 text-slate-500 hover:text-red-400 hover:bg-red-900/20 rounded transition-colors"
+                                    title={item.type === 'Contacts' ? 'Delete this CSV and all imported contacts' : 'Remove from history'}
+                                >
+                                    <X size={14} />
+                                </button>
                             </div>
                         </div>
                     ))}

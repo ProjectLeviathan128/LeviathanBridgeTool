@@ -1,6 +1,7 @@
 import { Contact, EnrichmentData, Scores, AppSettings, StrategicFocus, ScoreProvenance, Evidence } from '../types';
 import { bridgeMemory } from './bridgeMemory';
 import { extractLinkedInUrlFromContact, normalizeAnalysisOutput, parseToolCallFromText } from './enrichmentGuards';
+import { debugError, debugInfo, debugWarn } from './debugService';
 
 interface PuterChatOptions {
     model?: string;
@@ -22,6 +23,9 @@ declare const puter: {
 
 const WEB_SEARCH_MODEL = 'openai/gpt-5.2-chat';
 const MIN_VERIFIED_EVIDENCE = 2;
+const DEFAULT_ANALYSIS_MODELS_FAST = ['gemini-2.5-flash', 'openai/gpt-5-nano'];
+const DEFAULT_ANALYSIS_MODELS_QUALITY = ['gemini-2.5-pro', 'gemini-2.5-flash', WEB_SEARCH_MODEL];
+const DEFAULT_EVIDENCE_MODELS = [WEB_SEARCH_MODEL, 'gemini-2.5-pro', 'gemini-2.5-flash'];
 
 const BRIDGE_SYSTEM_INSTRUCTION = `
 ROLE: You are Bridge, an expert Contact Intelligence + Values-Aligned Matching System built exclusively for Project Leviathan.
@@ -60,10 +64,85 @@ const FOCUS_MODE_PROMPTS: Record<StrategicFocus, string> = {
     GOVT_INTEL: 'Prioritize Govt Access and Maritime Relevance. We need public sector intel.',
 };
 
-function getModelForSettings(settings: AppSettings): string {
+function getModelsForSettings(settings: AppSettings): string[] {
     return settings.analysisModel === 'fast'
-        ? 'openai/gpt-5-nano'
-        : WEB_SEARCH_MODEL;
+        ? DEFAULT_ANALYSIS_MODELS_FAST
+        : DEFAULT_ANALYSIS_MODELS_QUALITY;
+}
+
+async function chatWithModelFallback(
+    prompt: string | object[],
+    candidateModels: string[],
+    options: Omit<PuterChatOptions, 'model'> = {},
+    contextLabel = 'analysis'
+): Promise<any> {
+    const modelCandidates = [...candidateModels, ''];
+    let lastError: unknown = null;
+
+    for (const modelCandidate of modelCandidates) {
+        const model = modelCandidate.trim();
+        const mergedOptions: PuterChatOptions = model
+            ? { ...options, model }
+            : { ...options };
+
+        try {
+            return await puter.ai.chat(prompt, mergedOptions);
+        } catch (error) {
+            lastError = error;
+            console.warn(`[Bridge] ${contextLabel} model failed: ${model || 'default'}`, error);
+            debugWarn('model', `Model candidate failed (${contextLabel}).`, {
+                model: model || 'default',
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    }
+
+    debugError('model', `All model candidates failed (${contextLabel}).`, lastError);
+    throw lastError instanceof Error
+        ? lastError
+        : new Error(`All model candidates failed for ${contextLabel}.`);
+}
+
+function extractFirstJsonObject(text: string): string | null {
+    let start = -1;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+
+    for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+
+        if (inString) {
+            if (escape) {
+                escape = false;
+            } else if (char === '\\') {
+                escape = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+
+        if (char === '{') {
+            if (depth === 0) start = i;
+            depth += 1;
+            continue;
+        }
+
+        if (char === '}' && depth > 0) {
+            depth -= 1;
+            if (depth === 0 && start >= 0) {
+                return text.slice(start, i + 1);
+            }
+        }
+    }
+
+    return null;
 }
 
 // Helper to extract JSON from markdown-wrapped responses
@@ -73,10 +152,10 @@ function extractJSON(text: string): string {
     if (jsonMatch) {
         return jsonMatch[1].trim();
     }
-    // Try to find raw JSON object
-    const objectMatch = text.match(/\{[\s\S]*\}/);
-    if (objectMatch) {
-        return objectMatch[0];
+    // Extract first balanced object, avoiding greedy brace capture.
+    const firstObject = extractFirstJsonObject(text);
+    if (firstObject) {
+        return firstObject;
     }
     return text;
 }
@@ -103,6 +182,33 @@ function responseToText(response: any): string {
     }
     if (typeof response?.text === 'string') return response.text;
     return JSON.stringify(response);
+}
+
+async function repairJsonObject(
+    malformedText: string,
+    modelCandidates: string[]
+): Promise<string | null> {
+    const repairPrompt = `
+You are a JSON repair utility.
+Convert the content below into a single valid JSON object.
+Return ONLY raw JSON and nothing else.
+
+CONTENT:
+${malformedText}
+`;
+
+    try {
+        const response = await chatWithModelFallback(
+            repairPrompt,
+            modelCandidates,
+            { temperature: 0 },
+            'json-repair'
+        );
+        const repairedText = responseToText(response);
+        return extractJSON(repairedText);
+    } catch {
+        return null;
+    }
 }
 
 function isValidHttpUrl(url: string): boolean {
@@ -247,13 +353,20 @@ async function verifyUrlReachable(url: string): Promise<boolean> {
 }
 
 async function verifyEvidenceLinks(evidenceLinks: Evidence[]): Promise<Evidence[]> {
+    if (!puter?.net?.fetch) {
+        // Runtime URL checks are unavailable in some browser contexts.
+        // Keep normalized links so enrichment can continue instead of hard-blocking.
+        return evidenceLinks.slice(0, 8);
+    }
+
     const checks = await Promise.all(
         evidenceLinks.slice(0, 8).map(async (ev) => {
             const reachable = await verifyUrlReachable(ev.url);
             return reachable ? ev : null;
         })
     );
-    return checks.filter((ev): ev is Evidence => Boolean(ev));
+    const verified = checks.filter((ev): ev is Evidence => Boolean(ev));
+    return verified.length > 0 ? verified : evidenceLinks.slice(0, 8);
 }
 
 async function gatherWebEvidenceForContact(contact: Contact): Promise<Evidence[]> {
@@ -283,11 +396,28 @@ Schema:
 `;
 
     try {
-        const response = await puter.ai.chat(evidencePrompt, {
-            model: WEB_SEARCH_MODEL,
-            tools: [{ type: 'web_search' }],
-            temperature: 0.1,
-        });
+        debugInfo('evidence', 'Starting evidence gathering.', { contactId: contact.id, name: contact.name });
+        let response: any;
+
+        try {
+            response = await chatWithModelFallback(
+                evidencePrompt,
+                DEFAULT_EVIDENCE_MODELS,
+                {
+                    tools: [{ type: 'web_search' }],
+                    temperature: 0.1,
+                },
+                'evidence-search'
+            );
+        } catch {
+            // Fall back to plain generation if tool-enabled search is unavailable.
+            response = await chatWithModelFallback(
+                evidencePrompt,
+                DEFAULT_EVIDENCE_MODELS,
+                { temperature: 0.1 },
+                'evidence-search-fallback'
+            );
+        }
 
         const responseText = responseToText(response);
         const extractedArray = extractJSONArray(responseText);
@@ -332,9 +462,18 @@ Schema:
         }
 
         const verifiedEvidence = await verifyEvidenceLinks(candidateEvidence);
+        debugInfo('evidence', 'Evidence gathering complete.', {
+            contactId: contact.id,
+            candidateCount: candidateEvidence.length,
+            verifiedCount: verifiedEvidence.length
+        });
         return verifiedEvidence;
     } catch (error) {
         console.error('Web evidence gathering failed:', error);
+        debugError('evidence', 'Evidence gathering failed.', {
+            contactId: contact.id,
+            error: error instanceof Error ? error.message : String(error)
+        });
         return [];
     }
 }
@@ -358,8 +497,14 @@ export async function analyzeContactWithGemini(
     settings: AppSettings
 ): Promise<{ scores: Scores; enrichment: EnrichmentData }> {
     const thesisContext = bridgeMemory.getThesisContext();
-    const model = getModelForSettings(settings);
+    const modelCandidates = getModelsForSettings(settings);
     const linkedInSeed = extractLinkedInUrlFromContact(contact);
+    debugInfo('analysis', 'Starting contact analysis.', {
+        contactId: contact.id,
+        name: contact.name,
+        focusMode: settings.focusMode,
+        analysisMode: settings.analysisModel
+    });
     const verifiedEvidence = await gatherWebEvidenceForContact(contact);
 
     const prompt = `
@@ -416,6 +561,10 @@ Analyze this contact and return a JSON object with the following structure. DO N
     try {
         const evidenceGate = evaluateEvidenceGate(verifiedEvidence);
         if (!evidenceGate.passed) {
+            debugWarn('analysis', 'Evidence gate blocked analysis.', {
+                contactId: contact.id,
+                issues: evidenceGate.issues
+            });
             return {
                 scores: {
                     investorFit: createDefaultProvenance(0, 'Insufficient verified evidence'),
@@ -440,19 +589,45 @@ Analyze this contact and return a JSON object with the following structure. DO N
             };
         }
 
-        const response = await puter.ai.chat(prompt, { model });
+        const response = await chatWithModelFallback(
+            prompt,
+            modelCandidates,
+            {},
+            'contact-analysis'
+        );
 
         const responseText = responseToText(response);
 
         // Extract, parse, and normalize model output before it reaches UI state
         const jsonText = extractJSON(responseText);
-        const parsedResult = JSON.parse(jsonText);
+        let parsedResult: unknown;
+        try {
+            parsedResult = JSON.parse(jsonText);
+        } catch {
+            debugWarn('analysis', 'Model output was malformed JSON. Running repair pass.', {
+                contactId: contact.id
+            });
+            const repairedJson = await repairJsonObject(responseText, modelCandidates);
+            if (!repairedJson) {
+                throw new Error('Model output could not be parsed as JSON.');
+            }
+            parsedResult = JSON.parse(repairedJson);
+        }
         const normalized = normalizeAnalysisOutput(parsedResult, contact);
         normalized.enrichment.evidenceLinks = verifiedEvidence;
         normalized.enrichment.lastVerified = new Date().toISOString();
+        debugInfo('analysis', 'Contact analysis completed.', {
+            contactId: contact.id,
+            overallConfidence: normalized.scores.overallConfidence,
+            identityConfidence: normalized.enrichment.identityConfidence
+        });
         return normalized;
     } catch (error) {
         console.error('Gemini analysis error:', error);
+        debugError('analysis', 'Contact analysis failed.', {
+            contactId: contact.id,
+            error: error instanceof Error ? error.message : String(error)
+        });
 
         // Return default scores on error
         return {
@@ -544,6 +719,21 @@ For regular conversation, just respond normally.`
         const mentionsSearch = /\b(find|search|lookup|look up|show|list|who|which|anyone|contacts?|investors?|founders?|partners?|linkedin|universe)\b/i.test(normalized);
         const isMetaConversation = /\b(explain|why|how|help|settings|thesis|prompt|model)\b/i.test(normalized);
         return mentionsSearch && !isMetaConversation;
+    }
+
+    /**
+     * Replaces the chat session's contact list with the latest app state.
+     * Used when contacts are imported/deleted outside of chat tool calls.
+     */
+    public setContacts(contacts: Contact[]) {
+        const previousCount = this.contacts.length;
+        this.contacts = contacts;
+        if (contacts.length !== previousCount) {
+            this.history.push({
+                role: 'model',
+                content: `[SYSTEM NOTE: Contact universe updated. Current total contacts: ${contacts.length}.]`
+            });
+        }
     }
 
     /**

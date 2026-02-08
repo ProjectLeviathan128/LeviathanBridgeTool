@@ -33,6 +33,30 @@ function score(scoreValue: number) {
   };
 }
 
+function analysisPayload(summary = 'Verified operator with maritime-focused investment activity.') {
+  return {
+    scores: {
+      investorFit: score(81),
+      valuesAlignment: score(78),
+      govtAccess: score(40),
+      maritimeRelevance: score(86),
+      connectorScore: score(73),
+      overallConfidence: 80,
+    },
+    enrichment: {
+      summary,
+      alignmentRisks: [],
+      evidenceLinks: [],
+      recommendedAngle: 'Lead with maritime commercialization fit.',
+      recommendedAction: 'Request warm intro via shared conference network.',
+      tracks: ['Investment'],
+      flaggedAttributes: [],
+      identityConfidence: 90,
+      collisionRisk: false,
+    },
+  };
+}
+
 describe('analyzeContactWithGemini evidence gate', () => {
   const chatMock = vi.fn();
   const fetchMock = vi.fn();
@@ -108,29 +132,7 @@ describe('analyzeContactWithGemini evidence gate', () => {
           },
         ])
       )
-      .mockResolvedValueOnce(
-        JSON.stringify({
-          scores: {
-            investorFit: score(81),
-            valuesAlignment: score(78),
-            govtAccess: score(40),
-            maritimeRelevance: score(86),
-            connectorScore: score(73),
-            overallConfidence: 80,
-          },
-          enrichment: {
-            summary: 'Verified operator with maritime-focused investment activity.',
-            alignmentRisks: [],
-            evidenceLinks: [],
-            recommendedAngle: 'Lead with maritime commercialization fit.',
-            recommendedAction: 'Request warm intro via shared conference network.',
-            tracks: ['Investment'],
-            flaggedAttributes: [],
-            identityConfidence: 90,
-            collisionRisk: false,
-          },
-        })
-      );
+      .mockResolvedValueOnce(JSON.stringify(analysisPayload()));
 
     fetchMock.mockResolvedValue({ ok: true, status: 200 } as unknown as Response);
 
@@ -145,5 +147,66 @@ describe('analyzeContactWithGemini evidence gate', () => {
 
     const analysisPrompt = String(chatMock.mock.calls[1][0]);
     expect(analysisPrompt).toContain('=== VERIFIED_EVIDENCE ===');
+  });
+
+  it('falls back to secondary analysis model when primary fails', async () => {
+    chatMock
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          {
+            claim: 'Official profile',
+            url: 'https://www.linkedin.com/in/jordan-example/',
+            timestamp: '2026-02-01T00:00:00.000Z',
+            confidence: 90,
+          },
+          {
+            claim: 'Conference speaker bio',
+            url: 'https://www.maritimeforum.org/speakers/jordan-example',
+            timestamp: '2026-02-01T00:00:00.000Z',
+            confidence: 84,
+          },
+        ])
+      )
+      .mockRejectedValueOnce(new Error('primary model unavailable'))
+      .mockResolvedValueOnce(JSON.stringify(analysisPayload('Recovered on fallback model.')));
+
+    fetchMock.mockResolvedValue({ ok: true, status: 200 } as unknown as Response);
+
+    const result = await analyzeContactWithGemini(baseContact, settings);
+
+    expect(chatMock).toHaveBeenCalledTimes(3);
+    expect(chatMock.mock.calls[1][1]?.model).toBe('gemini-2.5-pro');
+    expect(chatMock.mock.calls[2][1]?.model).toBe('gemini-2.5-flash');
+    expect(result.enrichment.summary).toContain('Recovered on fallback model.');
+  });
+
+  it('repairs malformed analysis JSON instead of failing enrichment', async () => {
+    chatMock
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          {
+            claim: 'Official profile',
+            url: 'https://www.linkedin.com/in/jordan-example/',
+            timestamp: '2026-02-01T00:00:00.000Z',
+            confidence: 90,
+          },
+          {
+            claim: 'Conference speaker bio',
+            url: 'https://www.maritimeforum.org/speakers/jordan-example',
+            timestamp: '2026-02-01T00:00:00.000Z',
+            confidence: 84,
+          },
+        ])
+      )
+      .mockResolvedValueOnce('Result:\n{"scores":{"investorFit": }\n')
+      .mockResolvedValueOnce(JSON.stringify(analysisPayload('Recovered by JSON repair pass.')));
+
+    fetchMock.mockResolvedValue({ ok: true, status: 200 } as unknown as Response);
+
+    const result = await analyzeContactWithGemini(baseContact, settings);
+
+    expect(chatMock).toHaveBeenCalledTimes(3);
+    expect(String(chatMock.mock.calls[2][0])).toContain('JSON repair utility');
+    expect(result.enrichment.summary).toContain('Recovered by JSON repair pass.');
   });
 });

@@ -6,6 +6,7 @@ import ContactDetail from './components/ContactDetail';
 import UploadZone from './components/UploadZone';
 import ChatInterface from './components/ChatInterface';
 import Settings from './components/Settings';
+import DebugPanel from './components/DebugPanel';
 import { Contact, AppSettings, IngestionHistoryItem, ChatThread, SyncState } from './types';
 import { bridgeMemory } from './services/bridgeMemory';
 import {
@@ -15,6 +16,7 @@ import {
   loadFromCloud, saveToCloudDebounced, saveToCloud,
   setCurrentUser, clearCurrentUserData, loadSyncState, saveSyncState
 } from './services/storageService';
+import { debugError, debugInfo, debugWarn } from './services/debugService';
 import { LogIn, LogOut, User, Cloud, CloudOff, RefreshCw, AlertCircle } from 'lucide-react';
 
 // Puter.js global declaration
@@ -26,6 +28,16 @@ declare const puter: {
     getUser: () => Promise<{ username: string; email?: string; uuid?: string } | null>;
   };
 };
+
+function stringifyConsoleArg(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value instanceof Error) return `${value.name}: ${value.message}`;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -57,6 +69,40 @@ const App: React.FC = () => {
   // Logout confirmation modal
   const [showLogoutModal, setShowLogoutModal] = useState(false);
 
+  useEffect(() => {
+    const originalConsole = {
+      log: console.log.bind(console),
+      info: console.info.bind(console),
+      warn: console.warn.bind(console),
+      error: console.error.bind(console),
+    };
+
+    const bindings: Array<{ method: 'log' | 'info' | 'warn' | 'error'; logger: typeof debugInfo }> = [
+      { method: 'log', logger: debugInfo },
+      { method: 'info', logger: debugInfo },
+      { method: 'warn', logger: debugWarn },
+      { method: 'error', logger: debugError },
+    ];
+
+    bindings.forEach(({ method, logger }) => {
+      (console as unknown as Record<string, (...args: unknown[]) => void>)[method] = (...args: unknown[]) => {
+        originalConsole[method](...args);
+        const message = args.map(stringifyConsoleArg).join(' ').trim();
+        if (!message) return;
+        logger('console', message, args);
+      };
+    });
+
+    debugInfo('app', 'Debug panel initialized.');
+
+    return () => {
+      console.log = originalConsole.log;
+      console.info = originalConsole.info;
+      console.warn = originalConsole.warn;
+      console.error = originalConsole.error;
+    };
+  }, []);
+
   // Load user data for a specific user
   const loadUserData = useCallback(() => {
     const loadedContacts = loadContacts();
@@ -69,6 +115,10 @@ const App: React.FC = () => {
     setActiveThreadId(loadedThreads.length > 0 ? loadedThreads[0].id : 'default');
     setSettings(loadedSettings);
     setSyncState(loadedSyncState);
+    debugInfo('storage', 'Loaded local user data.', {
+      contacts: loadedContacts.length,
+      threads: loadedThreads.length
+    });
   }, []);
 
   // Clear UI state (for logout with clear)
@@ -91,6 +141,7 @@ const App: React.FC = () => {
     setSyncState({ status: 'idle', lastSyncedAt: null });
     bridgeMemory.clear();
     setThesisVersion(v => v + 1);
+    debugWarn('app', 'Cleared UI state.');
   }, []);
 
   // Load auth state on mount AND sync from cloud if signed in
@@ -118,6 +169,9 @@ const App: React.FC = () => {
             if (cloudData.settings) setSettings(cloudData.settings);
             if (cloudData.knowledge) setThesisVersion(v => v + 1);
             setSyncState({ status: 'synced', lastSyncedAt: Date.now() });
+            debugInfo('auth', 'Signed-in session restored from Puter.', {
+              username: userData.username
+            });
           }
         } else {
           // Anonymous user - load from legacy keys
@@ -128,6 +182,7 @@ const App: React.FC = () => {
         console.log('Puter auth not available or user not signed in');
         setCurrentUser(null);
         loadUserData();
+        debugWarn('auth', 'Puter auth unavailable. Running anonymous mode.');
       } finally {
         setIsSynced(true);
       }
@@ -160,13 +215,20 @@ const App: React.FC = () => {
   const handleForceSync = async () => {
     if (!user) return;
     setSyncState({ status: 'syncing', lastSyncedAt: syncState.lastSyncedAt });
+    debugInfo('sync', 'Manual force sync started.');
     const newState = await saveToCloud();
     setSyncState(newState);
+    if (newState.status === 'error') {
+      debugError('sync', 'Force sync failed.', newState.error);
+    } else {
+      debugInfo('sync', 'Force sync completed.', newState);
+    }
   };
 
   // Auth handlers
   const handleSignIn = async () => {
     setAuthLoading(true);
+    debugInfo('auth', 'Sign-in started.');
     try {
       await puter.auth.signIn();
       const userData = await puter.auth.getUser();
@@ -185,9 +247,11 @@ const App: React.FC = () => {
         if (cloudData.settings) setSettings(cloudData.settings);
         if (cloudData.knowledge) setThesisVersion(v => v + 1);
         setSyncState({ status: 'synced', lastSyncedAt: Date.now() });
+        debugInfo('auth', 'Sign-in completed.', { username: userData.username });
       }
     } catch (e) {
       console.error('Sign in failed:', e);
+      debugError('auth', 'Sign-in failed.', e);
     } finally {
       setAuthLoading(false);
     }
@@ -196,6 +260,7 @@ const App: React.FC = () => {
   const handleSignOut = async (clearData: boolean) => {
     setAuthLoading(true);
     setShowLogoutModal(false);
+    debugWarn('auth', 'Sign-out started.', { clearData });
     try {
       await puter.auth.signOut();
 
@@ -215,8 +280,10 @@ const App: React.FC = () => {
       if (!clearData) {
         loadUserData();
       }
+      debugInfo('auth', 'Sign-out completed.', { clearData });
     } catch (e) {
       console.error('Sign out failed:', e);
+      debugError('auth', 'Sign-out failed.', e);
     } finally {
       setAuthLoading(false);
     }
@@ -241,36 +308,69 @@ const App: React.FC = () => {
   const handleIngestContacts = (newContacts: Contact[]) => {
     setContacts(prev => [...prev, ...newContacts]);
     setActiveTab('contacts'); // Auto-switch to list view
+    debugInfo('ingestion', 'Contacts ingested into universe.', { count: newContacts.length });
   };
 
   const handleThesisUpdate = () => {
     setThesisVersion(prev => prev + 1);
+    debugInfo('knowledge', 'Thesis/context memory updated.');
   };
 
-  const handleAddHistory = (name: string, type: string) => {
+  const handleAddHistory = (name: string, type: string, metadata?: { batchId?: string; recordCount?: number }) => {
     const newItem: IngestionHistoryItem = {
-      id: Date.now().toString(),
+      id: `ing-history-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       name,
       type,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      status: 'Processed'
+      status: 'Processed',
+      batchId: metadata?.batchId,
+      recordCount: metadata?.recordCount
     };
     setIngestionHistory(prev => [newItem, ...prev]);
+    debugInfo('ingestion', 'History item added.', newItem);
+  };
+
+  const handleDeleteHistoryItem = (item: IngestionHistoryItem) => {
+    setIngestionHistory(prev => prev.filter(entry => entry.id !== item.id));
+    debugWarn('ingestion', 'History item removed.', item);
+
+    if (item.type !== 'Contacts') return;
+
+    const shouldRemoveContact = (contact: Contact) => {
+      if (item.batchId) {
+        return contact.ingestionMeta.batchId === item.batchId;
+      }
+      return contact.ingestionMeta.sourceLabel === item.name;
+    };
+
+    setContacts(prev => {
+      const nextContacts = prev.filter(contact => !shouldRemoveContact(contact));
+      debugWarn('ingestion', 'Cascade deleted contacts from universe.', {
+        removedCount: prev.length - nextContacts.length,
+        batchId: item.batchId,
+        source: item.name
+      });
+      return nextContacts;
+    });
+    setSelectedContact(prev => (prev && shouldRemoveContact(prev) ? null : prev));
   };
 
   const handleClearContacts = () => {
     setContacts([]);
     setActiveTab('dashboard');
+    debugWarn('ingestion', 'All contacts cleared from universe.');
   };
 
   const handleClearKnowledge = () => {
     bridgeMemory.clear();
     setThesisVersion(prev => prev + 1);
+    debugWarn('knowledge', 'Knowledge base cleared.');
   };
 
   // Chat Management Methods
   const handleUpdateThreads = (updatedThreads: ChatThread[]) => {
     setThreads(updatedThreads);
+    debugInfo('chat', 'Chat threads updated.', { count: updatedThreads.length });
   };
 
   // Sync status indicator component
@@ -331,6 +431,7 @@ const App: React.FC = () => {
             onThesisUpdate={handleThesisUpdate}
             history={ingestionHistory}
             onAddHistory={handleAddHistory}
+            onDeleteHistoryItem={handleDeleteHistoryItem}
           />
         );
       case 'settings':
@@ -518,6 +619,8 @@ const App: React.FC = () => {
             </div>
           </div>
         )}
+
+        <DebugPanel />
       </main>
     </div>
   );

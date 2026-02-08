@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Contact, AppSettings, ChatThread, ChatMessage } from '../types';
 import { createBridgeChat, analyzeContactWithGemini, Chat } from '../services/geminiService';
 import { assessEnrichmentQuality } from '../services/enrichmentGuards';
+import { debugError, debugInfo, debugWarn, requestDebugPanelOpen } from '../services/debugService';
 import { Send, Bot, User, Search, Loader2, ExternalLink, Zap, Plus, Trash2, RefreshCw, XCircle } from 'lucide-react';
 import EnrichmentModal, { EnrichmentProgress, EnrichmentStep } from './EnrichmentModal';
 
@@ -51,6 +52,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [activeThread?.messages, activeThread?.status]);
 
+    useEffect(() => {
+        chatSessions.current.forEach((chat) => {
+            chat.setContacts(contacts);
+        });
+    }, [contacts]);
+
     // Guard: If no threads exist yet (initial load), show loading state
     if (!activeThread) {
         return (
@@ -65,6 +72,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         if (!activeThread) return;
         cancelRef.current.cancelled = true;
         setEnrichmentProgress(prev => ({ ...prev, isOpen: false, cancelled: true }));
+        debugWarn('chat', 'Enrichment operation cancelled by user.', { threadId: activeThreadId });
         updateThread(activeThreadId, {
             status: 'idle',
             toolStatus: undefined,
@@ -98,6 +106,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         };
         onUpdateThreads([newThread, ...threads]);
         onSetActiveThread(newId);
+        debugInfo('chat', 'New chat thread created.', { threadId: newId });
     };
 
     const handleDeleteThread = (e: React.MouseEvent, id: string) => {
@@ -109,10 +118,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             onSetActiveThread(newThreads[0].id);
         }
         chatSessions.current.delete(id);
+        debugWarn('chat', 'Chat thread deleted.', { threadId: id });
     };
 
     const handleRefreshContext = () => {
         chatSessions.current.delete(activeThreadId);
+        debugInfo('chat', 'Chat context refreshed for active thread.', { threadId: activeThreadId });
         updateThread(activeThreadId, {
             messages: [...activeThread.messages, {
                 id: Date.now().toString(),
@@ -128,6 +139,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         // 1. Setup Message
         const userMsg: ChatMessage = { id: Date.now().toString(), role: 'user', text: input };
         const currentThreadId = activeThreadId; // Capture ID in closure
+        debugInfo('chat', 'User message sent.', { threadId: currentThreadId, preview: input.slice(0, 120) });
 
         // 2. Optimistic Update
         const updatedMessages = [...activeThread.messages, userMsg];
@@ -159,6 +171,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 if (searchCall) {
                     const query = ((searchCall.args as any).query || '').toLowerCase().trim();
                     updateThread(currentThreadId, { toolStatus: `Searching database for "${query}"...` });
+                    debugInfo('chat.tool', 'Executing search_contacts tool.', { threadId: currentThreadId, query });
 
                     const stopWords = new Set(['the', 'and', 'for', 'with', 'that', 'from', 'this', 'into', 'are', 'who', 'what', 'where']);
                     const tokens = query
@@ -191,6 +204,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                         .filter(m => m.score > 0)
                         .sort((a, b) => b.score - a.score)
                         .map(m => m.contact);
+                    debugInfo('chat.tool', 'Search completed.', { query, matches: matches.length });
 
                     // Limit to top 20 results to fit in context
                     const topMatches = matches.slice(0, 20).map(c => ({
@@ -238,6 +252,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     if (contactIds.length > MAX_BATCH_SIZE) {
                         contactIds = contactIds.slice(0, MAX_BATCH_SIZE);
                     }
+                    debugInfo('chat.tool', 'Executing enrich_contacts tool.', {
+                        threadId: currentThreadId,
+                        count: contactIds.length
+                    });
+                    requestDebugPanelOpen();
 
                     // Update Status to "Tool Use"
                     updateThread(currentThreadId, {
@@ -269,6 +288,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                         const contact = contacts.find(c => c.id === id);
                         if (contact) {
                             processed++;
+                            debugInfo('chat.enrich', 'Starting contact analysis.', {
+                                contactId: contact.id,
+                                name: contact.name,
+                                position: `${processed}/${contactIds.length}`
+                            });
 
                             // Reset steps for this contact and open modal
                             const steps = defaultSteps.map(s => ({ ...s, status: 'pending' as const }));
@@ -349,6 +373,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                                 } else {
                                     summaries.push(`\u2713 ${contact.name}: ${shortSummary}`);
                                 }
+                                debugInfo('chat.enrich', 'Contact analysis completed.', {
+                                    contactId: contact.id,
+                                    name: contact.name,
+                                    status: finalStatus
+                                });
 
                                 // Update UI immediately with this contact's result
                                 onBatchUpdateContacts([updatedContact]);
@@ -369,6 +398,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                             } catch (e) {
                                 console.error(`Failed to enrich ${contact.name}:`, e);
                                 summaries.push(`✗ ${contact.name}: Failed - ${e instanceof Error ? e.message : 'Unknown error'}`);
+                                debugError('chat.enrich', 'Contact analysis failed.', {
+                                    contactId: contact.id,
+                                    name: contact.name,
+                                    error: e instanceof Error ? e.message : String(e)
+                                });
+                                requestDebugPanelOpen();
                             }
                         }
                     }
@@ -387,6 +422,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     }];
 
                     const finalResult = await chat.sendMessage(toolResponse);
+                    debugInfo('chat.tool', 'Enrichment tool run completed.', {
+                        processed: enrichedResults.length,
+                        requested: contactIds.length,
+                        reviewNeeded: reviewNeededCount
+                    });
 
                     // Close the enrichment modal
                     setEnrichmentProgress(prev => ({ ...prev, isOpen: false }));
@@ -404,6 +444,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
                 } else {
                     // Unknown tool
+                    debugWarn('chat.tool', 'Unknown tool call requested by model.', { threadId: currentThreadId });
                     updateThread(currentThreadId, {
                         status: 'idle',
                         messages: [...updatedMessages, { id: Date.now().toString(), role: 'model', text: "Tool not supported." }]
@@ -433,6 +474,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
         } catch (err) {
             console.error("Chat error", err);
+            debugError('chat', 'Chat request failed.', err);
+            requestDebugPanelOpen();
             updateThread(currentThreadId, {
                 status: 'idle',
                 messages: [...updatedMessages, { id: Date.now().toString(), role: 'model', text: "Error: Connection interrupted." }]

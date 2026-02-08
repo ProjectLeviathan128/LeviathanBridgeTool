@@ -6,6 +6,7 @@ export interface IngestionMetadata {
   uploadDate: string;
   sourceLabel: string;
   trustLevel: 'Manual' | 'Scraped' | 'Third-Party';
+  batchId?: string;
 }
 
 export interface ThesisChunk {
@@ -91,6 +92,8 @@ export interface IngestionHistoryItem {
   type: string;
   timestamp: string;
   status: string;
+  batchId?: string;
+  recordCount?: number;
 }
 
 export interface ChatMessage {
@@ -143,4 +146,3 @@ export interface Organization {
   inviteCode: string;
   createdAt: number;
 }
-
