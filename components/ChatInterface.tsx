@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Contact, AppSettings, ChatThread, ChatMessage } from '../types';
 import { createBridgeChat, analyzeContactWithGemini, Chat } from '../services/geminiService';
+import { assessEnrichmentQuality } from '../services/enrichmentGuards';
 import { Send, Bot, User, Search, Loader2, ExternalLink, Zap, Plus, Trash2, RefreshCw, XCircle } from 'lucide-react';
 import EnrichmentModal, { EnrichmentProgress, EnrichmentStep } from './EnrichmentModal';
 
@@ -156,17 +157,40 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 const enrichCall = functionCalls.find((fc: any) => fc.name === 'enrich_contacts');
 
                 if (searchCall) {
-                    const query = (searchCall.args as any).query?.toLowerCase() || '';
+                    const query = ((searchCall.args as any).query || '').toLowerCase().trim();
                     updateThread(currentThreadId, { toolStatus: `Searching database for "${query}"...` });
 
-                    // Client-side search (In memory)
-                    // Matches against Name, Headline, Location, and RawText
-                    const matches = contacts.filter(c =>
-                        c.name.toLowerCase().includes(query) ||
-                        c.headline.toLowerCase().includes(query) ||
-                        c.location.toLowerCase().includes(query) ||
-                        (c.rawText && c.rawText.toLowerCase().includes(query))
-                    );
+                    const stopWords = new Set(['the', 'and', 'for', 'with', 'that', 'from', 'this', 'into', 'are', 'who', 'what', 'where']);
+                    const tokens = query
+                        .split(/[\s,.;:!?()\/\\-]+/)
+                        .map((t: string) => t.trim())
+                        .filter((t: string) => t.length > 1 && !stopWords.has(t));
+
+                    // Tokenized relevance search to handle natural language queries.
+                    const scoredMatches = contacts.map((c) => {
+                        const name = c.name.toLowerCase();
+                        const headline = c.headline.toLowerCase();
+                        const location = c.location.toLowerCase();
+                        const rawText = (c.rawText || '').toLowerCase();
+                        const haystack = `${name} ${headline} ${location} ${rawText}`;
+
+                        let score = 0;
+                        if (query && haystack.includes(query)) score += 20;
+
+                        tokens.forEach((token: string) => {
+                            if (name.includes(token)) score += 6;
+                            if (headline.includes(token)) score += 5;
+                            if (location.includes(token)) score += 3;
+                            if (rawText.includes(token)) score += 2;
+                        });
+
+                        return { contact: c, score };
+                    });
+
+                    const matches = scoredMatches
+                        .filter(m => m.score > 0)
+                        .sort((a, b) => b.score - a.score)
+                        .map(m => m.contact);
 
                     // Limit to top 20 results to fit in context
                     const topMatches = matches.slice(0, 20).map(c => ({
@@ -224,6 +248,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     // EXECUTE CLIENT-SIDE LOGIC WITH PROGRESS
                     const enrichedResults: Contact[] = [];
                     const summaries: string[] = [];
+                    let reviewNeededCount = 0;
                     let processed = 0;
 
                     // Open the enrichment modal
@@ -282,6 +307,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                                 }));
 
                                 const analysis = await analyzeContactWithGemini(contact, settings);
+                                const quality = assessEnrichmentQuality(analysis.enrichment);
+                                const finalStatus: Contact['status'] = quality.requiresReview ? 'Review Needed' : 'Enriched';
+                                if (quality.requiresReview) {
+                                    reviewNeededCount += 1;
+                                }
 
                                 // Step 3: Scoring
                                 setEnrichmentProgress(prev => ({
@@ -306,7 +336,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
                                 const updatedContact = {
                                     ...contact,
-                                    status: 'Enriched' as const,
+                                    status: finalStatus,
                                     scores: analysis.scores,
                                     enrichment: analysis.enrichment
                                 };
@@ -314,7 +344,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
 
                                 // Show brief summary in progress
                                 const shortSummary = analysis.enrichment.summary.slice(0, 80) + '...';
-                                summaries.push(`\u2713 ${contact.name}: ${shortSummary}`);
+                                if (quality.requiresReview) {
+                                    summaries.push(`\u26a0 ${contact.name}: Review Needed - ${quality.issues.join(' ')}`);
+                                } else {
+                                    summaries.push(`\u2713 ${contact.name}: ${shortSummary}`);
+                                }
 
                                 // Update UI immediately with this contact's result
                                 onBatchUpdateContacts([updatedContact]);
@@ -346,7 +380,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                         functionResponse: {
                             name: enrichCall.name,
                             response: {
-                                result: `Enrichment Complete (${enrichedResults.length}/${contactIds.length} successful):\n${summaries.join('\n')}`
+                                result: `Enrichment Complete (${enrichedResults.length}/${contactIds.length} processed): ${Math.max(0, enrichedResults.length - reviewNeededCount)} enriched, ${reviewNeededCount} review needed.\n${summaries.join('\n')}`
                             },
                             id: enrichCall.id
                         }

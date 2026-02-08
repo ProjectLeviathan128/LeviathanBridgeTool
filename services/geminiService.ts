@@ -1,5 +1,6 @@
 import { Contact, EnrichmentData, Scores, AppSettings, StrategicFocus, ScoreProvenance } from '../types';
 import { bridgeMemory } from './bridgeMemory';
+import { extractLinkedInUrlFromContact, normalizeAnalysisOutput, parseToolCallFromText } from './enrichmentGuards';
 
 // Declare Puter global (loaded via script tag)
 declare const puter: {
@@ -86,6 +87,7 @@ export async function analyzeContactWithGemini(
 ): Promise<{ scores: Scores; enrichment: EnrichmentData }> {
     const thesisContext = bridgeMemory.getThesisContext();
     const model = getModelForSettings(settings);
+    const linkedInSeed = extractLinkedInUrlFromContact(contact);
 
     const prompt = `
 ${BRIDGE_SYSTEM_INSTRUCTION}
@@ -102,6 +104,13 @@ Headline: ${contact.headline}
 Location: ${contact.location}
 Source: ${contact.source}
 Raw Notes: ${contact.rawText || 'None'}
+Known LinkedIn URL: ${linkedInSeed || 'None provided'}
+
+=== VERIFICATION RULES ===
+- You must use web research, including LinkedIn when available, before scoring.
+- Every non-trivial claim must map to at least one evidence URL.
+- Use at least 2 evidence links across at least 2 domains when possible.
+- If verification is weak, reduce identityConfidence and state uncertainty directly.
 
 === YOUR TASK ===
 Analyze this contact and return a JSON object with the following structure. DO NOT include markdown code blocks, just return raw JSON:
@@ -144,14 +153,10 @@ Analyze this contact and return a JSON object with the following structure. DO N
             responseText = JSON.stringify(response);
         }
 
-        // Extract and parse JSON
+        // Extract, parse, and normalize model output before it reaches UI state
         const jsonText = extractJSON(responseText);
-        const result = JSON.parse(jsonText);
-
-        return {
-            scores: result.scores,
-            enrichment: result.enrichment,
-        };
+        const parsedResult = JSON.parse(jsonText);
+        return normalizeAnalysisOutput(parsedResult, contact);
     } catch (error) {
         console.error('Gemini analysis error:', error);
 
@@ -240,6 +245,13 @@ For regular conversation, just respond normally.`
         }).join('\n');
     }
 
+    private isSearchIntent(userMessage: string): boolean {
+        const normalized = userMessage.toLowerCase();
+        const mentionsSearch = /\b(find|search|lookup|look up|show|list|who|which|anyone|contacts?|investors?|founders?|partners?|linkedin|universe)\b/i.test(normalized);
+        const isMetaConversation = /\b(explain|why|how|help|settings|thesis|prompt|model)\b/i.test(normalized);
+        return mentionsSearch && !isMetaConversation;
+    }
+
     /**
      * Updates the chat session's internal contact list with new data
      * This allows the agent to "remember" enrichment results mid-conversation.
@@ -318,19 +330,26 @@ For regular conversation, just respond normally.`
         // Regular conversation - call Gemini
         const response = await this.callGemini(userMessage);
 
-        // Check if response contains a tool call JSON
-        try {
-            const toolMatch = response.match(/\{"tool":\s*"enrich_contacts".*?\}/);
-            if (toolMatch) {
-                const toolCall = JSON.parse(toolMatch[0]);
-                functionCalls = [{
-                    name: 'enrich_contacts',
-                    id: `call_${Date.now()}`,
-                    args: { contactIds: toolCall.contactIds }
-                }];
-            }
-        } catch (e) {
-            // Not a tool call, continue normally
+        // Parse JSON tool call(s) from model output (supports multiline JSON and both tools)
+        const parsedToolCall = parseToolCallFromText(response);
+        if (parsedToolCall) {
+            functionCalls = [{
+                name: parsedToolCall.name,
+                id: `call_${Date.now()}`,
+                args: parsedToolCall.args
+            }];
+        } else if (this.isSearchIntent(userMessage)) {
+            // Deterministic fallback: force database search tool for contact-discovery prompts.
+            functionCalls = [{
+                name: 'search_contacts',
+                id: `call_${Date.now()}`,
+                args: { query: userMessage.trim() }
+            }];
+            return {
+                text: `Searching contacts for "${userMessage.trim()}"...`,
+                functionCalls,
+                candidates: [{ groundingMetadata: { groundingChunks: [] } }]
+            };
         }
 
         return {
