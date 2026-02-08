@@ -506,6 +506,45 @@ const App: React.FC = () => {
     setSyncState({ status: 'syncing', lastSyncedAt: syncState.lastSyncedAt });
     debugInfo('sync', 'Manual force sync started.');
     const newState = await saveToCloud();
+
+    if (organization) {
+      const role: 'owner' | 'member' = organization.ownerId === (user.uuid || user.username) ? 'owner' : 'member';
+      const currentUserMember = toOrganizationMember(user, role);
+      const remote = await loadOrganizationWorkspaceFromCloud(organization.id);
+
+      if (remote) {
+        const syncedOrganization = upsertOrganizationMember(remote.organization, currentUserMember);
+        const mergedContacts = mergeContactsWithDedupe(remote.contacts, contacts).contacts;
+        const mergedKnowledge = mergeKnowledgeChunks(remote.knowledge, bridgeMemory.getAllChunks());
+        const mergedHistory = mergeIngestionHistoryItems(remote.ingestionHistory, ingestionHistory);
+
+        setContacts(mergedContacts);
+        setIngestionHistory(mergedHistory);
+        bridgeMemory.initialize(mergedKnowledge);
+        setThesisVersion(v => v + 1);
+        setOrganization(syncedOrganization);
+        syncOrganizationContext(syncedOrganization);
+        orgWorkspaceLoadedRef.current = syncedOrganization.id;
+
+        await saveOrganizationWorkspaceToCloud({
+          version: 1,
+          orgId: syncedOrganization.id,
+          updatedAt: new Date().toISOString(),
+          updatedBy: user.username,
+          organization: syncedOrganization,
+          contacts: mergedContacts,
+          knowledge: mergedKnowledge,
+          ingestionHistory: mergedHistory
+        });
+      } else {
+        const seededOrganization = upsertOrganizationMember(organization, currentUserMember);
+        setOrganization(seededOrganization);
+        syncOrganizationContext(seededOrganization);
+        orgWorkspaceLoadedRef.current = seededOrganization.id;
+        await saveOrganizationWorkspaceToCloud(buildWorkspacePayload(seededOrganization));
+      }
+    }
+
     setSyncState(newState);
     if (newState.status === 'error') {
       debugError('sync', 'Force sync failed.', newState.error);
