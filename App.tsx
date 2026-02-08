@@ -8,7 +8,7 @@ import ChatInterface from './components/ChatInterface';
 import Settings from './components/Settings';
 import DebugPanel from './components/DebugPanel';
 import OrganizationHub from './components/OrganizationHub';
-import { Contact, AppSettings, IngestionHistoryItem, ChatThread, SyncState, Organization, OrganizationMember } from './types';
+import { Contact, AppSettings, IngestionHistoryItem, ChatThread, SyncState, Organization, OrganizationMember, OrganizationWorkspacePackage } from './types';
 import { bridgeMemory } from './services/bridgeMemory';
 import {
   loadContacts, saveContactsDebounced,
@@ -18,7 +18,10 @@ import {
   loadIngestionHistory, saveIngestionHistoryDebounced,
   loadFromCloud, saveToCloudDebounced, saveToCloud,
   setCurrentUser, clearCurrentUserData, loadSyncState, saveSyncState,
-  loadOrganization, saveOrganizationDebounced
+  loadOrganization, saveOrganizationDebounced,
+  loadOrganizationWorkspaceFromCloud,
+  saveOrganizationWorkspaceToCloud,
+  saveOrganizationWorkspaceToCloudDebounced
 } from './services/storageService';
 import { debugError, debugInfo, debugWarn } from './services/debugService';
 import {
@@ -111,6 +114,34 @@ function normalizeContactCollaboration(contact: Contact): Contact {
   );
 }
 
+function mergeKnowledgeChunks(
+  existing: ReturnType<typeof bridgeMemory.getAllChunks>,
+  incoming: ReturnType<typeof bridgeMemory.getAllChunks>
+) {
+  const merged = [...existing];
+  const seen = new Set(existing.map(chunk => `${chunk.source}|${chunk.content}`));
+  incoming.forEach(chunk => {
+    const key = `${chunk.source}|${chunk.content}`;
+    if (!seen.has(key)) {
+      merged.push(chunk);
+      seen.add(key);
+    }
+  });
+  return merged;
+}
+
+function mergeIngestionHistoryItems(existing: IngestionHistoryItem[], incoming: IngestionHistoryItem[]) {
+  const merged = [...existing];
+  const seen = new Set(existing.map(item => item.id));
+  incoming.forEach(item => {
+    if (!seen.has(item.id)) {
+      merged.push(item);
+      seen.add(item.id);
+    }
+  });
+  return merged;
+}
+
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -142,9 +173,21 @@ const App: React.FC = () => {
   const [organization, setOrganization] = useState<Organization | null>(null);
   const [orgMessage, setOrgMessage] = useState<string | null>(null);
   const orgContextIdRef = useRef<string | null>(null);
+  const orgWorkspaceLoadedRef = useRef<string | null>(null);
 
   // Logout confirmation modal
   const [showLogoutModal, setShowLogoutModal] = useState(false);
+
+  const buildWorkspacePayload = useCallback((orgValue: Organization): OrganizationWorkspacePackage => ({
+    version: 1,
+    orgId: orgValue.id,
+    updatedAt: new Date().toISOString(),
+    updatedBy: user?.username || 'unknown',
+    organization: orgValue,
+    contacts,
+    knowledge: bridgeMemory.getAllChunks(),
+    ingestionHistory
+  }), [contacts, ingestionHistory, user?.username]);
 
   useEffect(() => {
     const originalConsole = {
@@ -256,6 +299,7 @@ const App: React.FC = () => {
     setOrgMessage(null);
     bridgeMemory.clear();
     orgContextIdRef.current = null;
+    orgWorkspaceLoadedRef.current = null;
     setThesisVersion(v => v + 1);
     debugWarn('app', 'Cleared UI state.');
   }, []);
@@ -377,6 +421,84 @@ const App: React.FC = () => {
     orgWithPin.inviteCode = createOrganizationInviteCode(orgWithPin, inviter);
     setOrganization(orgWithPin);
   }, [user, organization]);
+
+  useEffect(() => {
+    if (!isSynced || !user || !organization) return;
+    if (orgWorkspaceLoadedRef.current === organization.id) return;
+
+    let cancelled = false;
+    const loadWorkspace = async () => {
+      const role: 'owner' | 'member' = organization.ownerId === (user.uuid || user.username) ? 'owner' : 'member';
+      const currentUserMember = toOrganizationMember(user, role);
+      const localKnowledge = bridgeMemory.getAllChunks();
+      const localHistory = ingestionHistory;
+      const localContacts = contacts;
+
+      const remote = await loadOrganizationWorkspaceFromCloud(organization.id);
+      if (cancelled) return;
+
+      if (remote) {
+        const syncedOrganization = upsertOrganizationMember(remote.organization, currentUserMember);
+        const mergedContacts = mergeContactsWithDedupe(remote.contacts, localContacts).contacts;
+        const mergedKnowledge = mergeKnowledgeChunks(remote.knowledge, localKnowledge);
+        const mergedHistory = mergeIngestionHistoryItems(remote.ingestionHistory, localHistory);
+
+        setContacts(mergedContacts);
+        setIngestionHistory(mergedHistory);
+        bridgeMemory.initialize(mergedKnowledge);
+        setThesisVersion(v => v + 1);
+        setOrganization(syncedOrganization);
+        syncOrganizationContext(syncedOrganization);
+
+        orgWorkspaceLoadedRef.current = organization.id;
+        await saveOrganizationWorkspaceToCloud({
+          version: 1,
+          orgId: syncedOrganization.id,
+          updatedAt: new Date().toISOString(),
+          updatedBy: user.username,
+          organization: syncedOrganization,
+          contacts: mergedContacts,
+          knowledge: mergedKnowledge,
+          ingestionHistory: mergedHistory
+        });
+        setOrgMessage(`Organization workspace synced for "${syncedOrganization.name}".`);
+        return;
+      }
+
+      const seededOrganization = upsertOrganizationMember(organization, currentUserMember);
+      setOrganization(seededOrganization);
+      syncOrganizationContext(seededOrganization);
+      orgWorkspaceLoadedRef.current = organization.id;
+      await saveOrganizationWorkspaceToCloud({
+        version: 1,
+        orgId: seededOrganization.id,
+        updatedAt: new Date().toISOString(),
+        updatedBy: user.username,
+        organization: seededOrganization,
+        contacts: localContacts,
+        knowledge: localKnowledge,
+        ingestionHistory: localHistory
+      });
+      setOrgMessage(`Organization workspace initialized for "${seededOrganization.name}".`);
+    };
+
+    void loadWorkspace();
+    return () => {
+      cancelled = true;
+    };
+  }, [isSynced, user, organization?.id]);
+
+  useEffect(() => {
+    if (!isSynced || !user || !organization) return;
+    if (orgWorkspaceLoadedRef.current !== organization.id) return;
+    saveOrganizationWorkspaceToCloudDebounced(buildWorkspacePayload(organization));
+  }, [isSynced, user, organization, contacts, ingestionHistory, thesisVersion, buildWorkspacePayload]);
+
+  useEffect(() => {
+    if (!organization) {
+      orgWorkspaceLoadedRef.current = null;
+    }
+  }, [organization]);
 
   // Force sync to cloud
   const handleForceSync = async () => {

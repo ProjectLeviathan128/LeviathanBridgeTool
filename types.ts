@@ -213,3 +213,14 @@ export interface OrganizationSyncPackage {
   organization: Organization;
   contacts: Contact[];
 }
+
+export interface OrganizationWorkspacePackage {
+  version: 1;
+  orgId: string;
+  updatedAt: string;
+  updatedBy: string;
+  organization: Organization;
+  contacts: Contact[];
+  knowledge: ThesisChunk[];
+  ingestionHistory: IngestionHistoryItem[];
+}

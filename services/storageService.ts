@@ -60,7 +60,17 @@ function safeJsonParse<T>(json: string | null, fallback: T): T {
 // =====================
 // CONTACTS
 // =====================
-import { Contact, AppSettings, ChatThread, ThesisChunk, SyncState, Organization, IngestionHistoryItem } from '../types';
+import {
+    Contact,
+    AppSettings,
+    ChatThread,
+    ThesisChunk,
+    SyncState,
+    Organization,
+    IngestionHistoryItem,
+    OrganizationWorkspacePackage
+} from '../types';
+import { mergeContactsWithDedupe } from './organizationService';
 
 export function saveContacts(contacts: Contact[]): void {
     try {
@@ -286,6 +296,93 @@ function getCloudFilePath(): string {
     return 'leviathan_bridge_data.json';
 }
 
+function getOrganizationCloudFilePath(orgId: string): string {
+    const normalizedOrgId = orgId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `leviathan_org_${normalizedOrgId}_workspace.json`;
+}
+
+function mergeKnowledgeChunks(existing: ThesisChunk[], incoming: ThesisChunk[]): ThesisChunk[] {
+    const merged = [...existing];
+    const seen = new Set(existing.map(chunk => `${chunk.source}|${chunk.content}`));
+    incoming.forEach(chunk => {
+        const key = `${chunk.source}|${chunk.content}`;
+        if (!seen.has(key)) {
+            merged.push(chunk);
+            seen.add(key);
+        }
+    });
+    return merged;
+}
+
+function mergeIngestionHistoryEntries(
+    existing: IngestionHistoryItem[],
+    incoming: IngestionHistoryItem[]
+): IngestionHistoryItem[] {
+    const merged = [...existing];
+    const seen = new Set(existing.map(item => item.id));
+    incoming.forEach(item => {
+        if (!seen.has(item.id)) {
+            merged.push(item);
+            seen.add(item.id);
+        }
+    });
+    return merged.sort((a, b) => {
+        const aTime = Date.parse(a.timestamp) || 0;
+        const bTime = Date.parse(b.timestamp) || 0;
+        return bTime - aTime;
+    });
+}
+
+function mergeOrganizationRecords(existing: Organization, incoming: Organization): Organization {
+    const newer = incoming.updatedAt >= existing.updatedAt ? incoming : existing;
+    const older = newer === incoming ? existing : incoming;
+    const memberMap = new Map<string, typeof newer.members[number]>();
+
+    older.members.forEach(member => memberMap.set(member.userId, member));
+    newer.members.forEach(member => memberMap.set(member.userId, member));
+
+    return {
+        ...newer,
+        members: Array.from(memberMap.values()),
+        invitePin: newer.invitePin || older.invitePin,
+    };
+}
+
+function mergeOrganizationWorkspacePackages(
+    existing: OrganizationWorkspacePackage,
+    incoming: OrganizationWorkspacePackage
+): OrganizationWorkspacePackage {
+    const mergedContacts = mergeContactsWithDedupe(existing.contacts, incoming.contacts).contacts;
+    const mergedKnowledge = mergeKnowledgeChunks(existing.knowledge, incoming.knowledge);
+    const mergedHistory = mergeIngestionHistoryEntries(existing.ingestionHistory, incoming.ingestionHistory);
+    const mergedOrganization = mergeOrganizationRecords(existing.organization, incoming.organization);
+
+    const updatedAt = new Date().toISOString();
+    return {
+        version: 1,
+        orgId: incoming.orgId || existing.orgId,
+        updatedAt,
+        updatedBy: incoming.updatedBy || existing.updatedBy,
+        organization: {
+            ...mergedOrganization,
+            updatedAt: Math.max(existing.organization.updatedAt, incoming.organization.updatedAt, Date.now()),
+        },
+        contacts: mergedContacts,
+        knowledge: mergedKnowledge,
+        ingestionHistory: mergedHistory,
+    };
+}
+
+async function readCloudTextFile(path: string): Promise<string | null> {
+    try {
+        const file = await puter.fs.read(path);
+        if (!file) return null;
+        return await file.text();
+    } catch {
+        return null;
+    }
+}
+
 export async function saveToCloud(): Promise<SyncState> {
     if (typeof puter === 'undefined' || !puter.auth.isSignedIn()) {
         return { status: 'idle', lastSyncedAt: null };
@@ -410,3 +507,56 @@ export async function loadFromCloud(): Promise<{
         };
     }
 }
+
+export async function loadOrganizationWorkspaceFromCloud(orgId: string): Promise<OrganizationWorkspacePackage | null> {
+    if (typeof puter === 'undefined' || !puter.auth.isSignedIn()) return null;
+    if (!orgId.trim()) return null;
+
+    try {
+        const raw = await readCloudTextFile(getOrganizationCloudFilePath(orgId));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as OrganizationWorkspacePackage;
+
+        if (parsed.version !== 1 || parsed.orgId !== orgId) return null;
+        if (!parsed.organization || !Array.isArray(parsed.contacts) || !Array.isArray(parsed.knowledge)) return null;
+
+        return parsed;
+    } catch (e) {
+        console.error('Organization workspace load failed:', e);
+        return null;
+    }
+}
+
+export async function saveOrganizationWorkspaceToCloud(
+    payload: OrganizationWorkspacePackage
+): Promise<SyncState> {
+    if (typeof puter === 'undefined' || !puter.auth.isSignedIn()) {
+        return { status: 'idle', lastSyncedAt: null };
+    }
+
+    try {
+        const path = getOrganizationCloudFilePath(payload.orgId);
+        const existingRaw = await readCloudTextFile(path);
+        let nextPayload = payload;
+
+        if (existingRaw) {
+            try {
+                const existing = JSON.parse(existingRaw) as OrganizationWorkspacePackage;
+                if (existing.version === 1 && existing.orgId === payload.orgId) {
+                    nextPayload = mergeOrganizationWorkspacePackages(existing, payload);
+                }
+            } catch {
+                // Keep incoming payload if existing blob is malformed.
+            }
+        }
+
+        nextPayload.updatedAt = new Date().toISOString();
+        await puter.fs.write(path, JSON.stringify(nextPayload));
+        return { status: 'synced', lastSyncedAt: Date.now() };
+    } catch (e) {
+        console.error('Organization workspace save failed:', e);
+        return { status: 'error', lastSyncedAt: null, error: String(e) };
+    }
+}
+
+export const saveOrganizationWorkspaceToCloudDebounced = debounce(saveOrganizationWorkspaceToCloud, 2000);
