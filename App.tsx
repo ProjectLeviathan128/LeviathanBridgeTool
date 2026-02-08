@@ -32,6 +32,7 @@ import {
   parseOrganizationSyncPackage,
   upsertOrganizationMember
 } from './services/organizationService';
+import { extractTextFromKnowledgeFile } from './services/documentService';
 import { LogIn, LogOut, User, Cloud, CloudOff, RefreshCw, AlertCircle } from 'lucide-react';
 
 // Puter.js global declaration
@@ -72,6 +73,12 @@ function orgThesisSource(orgId: string): string {
 
 function orgContextSource(orgId: string): string {
   return `org:${orgId}:context`;
+}
+
+function appendOrganizationDocument(existing: string, fileName: string, text: string): string {
+  const section = `[${fileName}]\n${text.trim()}`;
+  if (!existing.trim()) return section;
+  return `${existing.trim()}\n\n${section}`;
 }
 
 const App: React.FC = () => {
@@ -656,6 +663,88 @@ const App: React.FC = () => {
     debugInfo('organization', 'Deduplication completed.', result);
   };
 
+  const handleIngestOrganizationContacts = async (file: File) => {
+    try {
+      const { parseAndMapCSV } = await import('./services/csvService');
+      const parsedContacts = await parseAndMapCSV(file);
+      if (parsedContacts.length === 0) {
+        throw new Error(`No valid contacts found in "${file.name}".`);
+      }
+
+      const batchId = `org-ing-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const sourceLabel = organization ? `${organization.name} (${file.name})` : file.name;
+      const preparedContacts = parsedContacts.map((contact) => ({
+        ...contact,
+        ingestionMeta: {
+          ...contact.ingestionMeta,
+          sourceLabel,
+          batchId
+        }
+      }));
+
+      const mergeResult = mergeContactsWithDedupe(contacts, preparedContacts);
+      setContacts(mergeResult.contacts);
+      setSelectedContact(prev => (prev ? mergeResult.contacts.find(c => c.id === prev.id) || null : null));
+      handleAddHistory(file.name, 'Contacts', {
+        batchId,
+        recordCount: preparedContacts.length
+      });
+      setOrgMessage(
+        `Imported ${preparedContacts.length} contacts from ${file.name}. Added ${mergeResult.added}, merged ${mergeResult.duplicates} duplicates.`
+      );
+      debugInfo('organization', 'Organization contacts imported.', {
+        fileName: file.name,
+        total: preparedContacts.length,
+        added: mergeResult.added,
+        duplicates: mergeResult.duplicates
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setOrgMessage(`Contact import failed: ${message}`);
+      debugError('organization', 'Organization contact import failed.', e);
+      throw e instanceof Error ? e : new Error(message);
+    }
+  };
+
+  const handleIngestOrganizationDocument = async (file: File, target: 'thesis' | 'context') => {
+    if (!organization) {
+      const error = new Error('Create or join an organization before adding shared documents.');
+      setOrgMessage(error.message);
+      throw error;
+    }
+
+    try {
+      const extracted = await extractTextFromKnowledgeFile(file);
+      const nextOrganization: Organization = {
+        ...organization,
+        thesis: target === 'thesis'
+          ? appendOrganizationDocument(organization.thesis, file.name, extracted.text)
+          : organization.thesis,
+        strategicContext: target === 'context'
+          ? appendOrganizationDocument(organization.strategicContext, file.name, extracted.text)
+          : organization.strategicContext,
+        updatedAt: Date.now()
+      };
+
+      setOrganization(nextOrganization);
+      syncOrganizationContext(nextOrganization);
+      handleAddHistory(file.name, target === 'thesis' ? 'Thesis' : 'Context');
+      setOrgMessage(`Added ${file.name} to shared ${target === 'thesis' ? 'thesis' : 'strategic context'}.`);
+      debugInfo('organization', 'Organization document imported.', {
+        fileName: file.name,
+        target,
+        fileType: extracted.fileType,
+        pageCount: extracted.pageCount,
+        rowCount: extracted.rowCount
+      });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setOrgMessage(`Document import failed: ${message}`);
+      debugError('organization', 'Organization document import failed.', e);
+      throw e instanceof Error ? e : new Error(message);
+    }
+  };
+
   const handleExportOrganizationPackage = () => {
     if (!organization || !user) {
       setOrgMessage('Create or join an organization before exporting.');
@@ -827,6 +916,8 @@ const App: React.FC = () => {
             onDedupeContacts={handleDedupeContacts}
             onExportPackage={handleExportOrganizationPackage}
             onImportPackage={handleImportOrganizationPackage}
+            onIngestOrganizationContacts={handleIngestOrganizationContacts}
+            onIngestOrganizationDocument={handleIngestOrganizationDocument}
           />
         );
       case 'thesis':

@@ -3,7 +3,9 @@ import {
   Building2,
   Copy,
   Download,
+  FileUp,
   GitMerge,
+  Loader2,
   Network,
   RefreshCw,
   Upload,
@@ -11,6 +13,7 @@ import {
   Users,
 } from 'lucide-react';
 import { Organization } from '../types';
+import { extractTextFromKnowledgeFile } from '../services/documentService';
 
 interface OrganizationHubProps {
   user: { username: string; email?: string; uuid?: string } | null;
@@ -24,6 +27,14 @@ interface OrganizationHubProps {
   onDedupeContacts: () => void;
   onExportPackage: () => void;
   onImportPackage: (file: File) => void;
+  onIngestOrganizationContacts: (file: File) => Promise<void> | void;
+  onIngestOrganizationDocument: (file: File, target: 'thesis' | 'context') => Promise<void> | void;
+}
+
+function appendDocumentText(existing: string, fileName: string, text: string): string {
+  const section = `[${fileName}]\n${text.trim()}`;
+  if (!existing.trim()) return section;
+  return `${existing.trim()}\n\n${section}`;
 }
 
 const OrganizationHub: React.FC<OrganizationHubProps> = ({
@@ -38,6 +49,8 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
   onDedupeContacts,
   onExportPackage,
   onImportPackage,
+  onIngestOrganizationContacts,
+  onIngestOrganizationDocument,
 }) => {
   const [createName, setCreateName] = useState('');
   const [createThesis, setCreateThesis] = useState('');
@@ -47,7 +60,16 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
   const [editingThesis, setEditingThesis] = useState('');
   const [editingContext, setEditingContext] = useState('');
   const [copied, setCopied] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [localMessage, setLocalMessage] = useState<string | null>(null);
+
   const importInputRef = useRef<HTMLInputElement>(null);
+  const createContactsInputRef = useRef<HTMLInputElement>(null);
+  const createThesisInputRef = useRef<HTMLInputElement>(null);
+  const createContextInputRef = useRef<HTMLInputElement>(null);
+  const orgContactsInputRef = useRef<HTMLInputElement>(null);
+  const orgThesisInputRef = useRef<HTMLInputElement>(null);
+  const orgContextInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!organization) return;
@@ -72,6 +94,66 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
     if (!file) return;
     onImportPackage(file);
     event.target.value = '';
+  };
+
+  const withUploadState = async (operation: () => Promise<void>) => {
+    setIsUploading(true);
+    setLocalMessage(null);
+    try {
+      await operation();
+    } catch (error) {
+      setLocalMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleCreateKnowledgeUpload = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+    target: 'thesis' | 'context'
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    await withUploadState(async () => {
+      const extracted = await extractTextFromKnowledgeFile(file);
+      if (target === 'thesis') {
+        setCreateThesis((current) => appendDocumentText(current, file.name, extracted.text));
+      } else {
+        setCreateStrategicContext((current) => appendDocumentText(current, file.name, extracted.text));
+      }
+      setLocalMessage(
+        `Loaded ${file.name} into ${target === 'thesis' ? 'thesis' : 'strategic context'} draft.`
+      );
+    });
+  };
+
+  const handleContactsUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    await withUploadState(async () => {
+      await Promise.resolve(onIngestOrganizationContacts(file));
+      setLocalMessage(`Imported ${file.name} into the shared contact universe.`);
+    });
+  };
+
+  const handleOrganizationKnowledgeUpload = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+    target: 'thesis' | 'context'
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    await withUploadState(async () => {
+      await Promise.resolve(onIngestOrganizationDocument(file, target));
+      setLocalMessage(
+        `Added ${file.name} to organization ${target === 'thesis' ? 'thesis' : 'strategic context'}.`
+      );
+    });
   };
 
   if (!user) {
@@ -103,6 +185,12 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
         </div>
       )}
 
+      {localMessage && (
+        <div className="px-4 py-3 bg-slate-900 border border-slate-700 rounded text-sm text-slate-200">
+          {localMessage}
+        </div>
+      )}
+
       {!organization ? (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
@@ -128,13 +216,74 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
               placeholder="Strategic context (current priorities)"
               className="w-full min-h-[120px] bg-slate-950 border border-slate-700 rounded p-2.5 text-sm text-slate-200 focus:outline-none focus:border-emerald-500 resize-y"
             />
+
+            <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-3 space-y-3">
+              <p className="text-xs uppercase tracking-wider text-slate-500">Bootstrap From Files</p>
+              <p className="text-xs text-slate-400">
+                Upload existing docs to prefill thesis/context and import your current contact CSV.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <button
+                  onClick={() => createThesisInputRef.current?.click()}
+                  disabled={isUploading}
+                  className="py-2 text-xs bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/60 text-slate-200 rounded border border-slate-700 transition-colors inline-flex items-center justify-center gap-1.5"
+                >
+                  {isUploading ? <Loader2 size={12} className="animate-spin" /> : <FileUp size={12} />}
+                  Thesis Doc
+                </button>
+                <button
+                  onClick={() => createContextInputRef.current?.click()}
+                  disabled={isUploading}
+                  className="py-2 text-xs bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/60 text-slate-200 rounded border border-slate-700 transition-colors inline-flex items-center justify-center gap-1.5"
+                >
+                  {isUploading ? <Loader2 size={12} className="animate-spin" /> : <FileUp size={12} />}
+                  Context Doc
+                </button>
+                <button
+                  onClick={() => createContactsInputRef.current?.click()}
+                  disabled={isUploading}
+                  className="py-2 text-xs bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/60 text-white rounded border border-blue-500/40 transition-colors inline-flex items-center justify-center gap-1.5"
+                >
+                  {isUploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
+                  Contacts CSV
+                </button>
+              </div>
+              <input
+                ref={createThesisInputRef}
+                type="file"
+                accept=".txt,.md,.pdf,.csv"
+                onChange={(event) => {
+                  void handleCreateKnowledgeUpload(event, 'thesis');
+                }}
+                className="hidden"
+              />
+              <input
+                ref={createContextInputRef}
+                type="file"
+                accept=".txt,.md,.pdf,.csv"
+                onChange={(event) => {
+                  void handleCreateKnowledgeUpload(event, 'context');
+                }}
+                className="hidden"
+              />
+              <input
+                ref={createContactsInputRef}
+                type="file"
+                accept=".csv,.txt"
+                onChange={(event) => {
+                  void handleContactsUpload(event);
+                }}
+                className="hidden"
+              />
+            </div>
+
             <button
               onClick={() => onCreateOrganization({
                 name: createName,
                 thesis: createThesis,
                 strategicContext: createStrategicContext,
               })}
-              disabled={!createName.trim()}
+              disabled={!createName.trim() || isUploading}
               className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 text-white rounded text-sm font-medium transition-colors"
             >
               Create Workspace
@@ -245,6 +394,66 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
                     {copied ? 'Copied' : 'Copy Invite'}
                   </button>
                 </div>
+              </div>
+
+              <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
+                <h4 className="text-white font-semibold">Organization Documents</h4>
+                <p className="text-sm text-slate-400">
+                  Upload files directly into shared thesis/context, or push your contact CSV into the org universe.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                  <button
+                    onClick={() => orgThesisInputRef.current?.click()}
+                    disabled={isUploading}
+                    className="py-2.5 text-xs bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/60 text-slate-200 rounded border border-slate-700 transition-colors inline-flex items-center justify-center gap-1.5"
+                  >
+                    {isUploading ? <Loader2 size={12} className="animate-spin" /> : <FileUp size={12} />}
+                    Thesis Doc
+                  </button>
+                  <button
+                    onClick={() => orgContextInputRef.current?.click()}
+                    disabled={isUploading}
+                    className="py-2.5 text-xs bg-slate-800 hover:bg-slate-700 disabled:bg-slate-800/60 text-slate-200 rounded border border-slate-700 transition-colors inline-flex items-center justify-center gap-1.5"
+                  >
+                    {isUploading ? <Loader2 size={12} className="animate-spin" /> : <FileUp size={12} />}
+                    Context Doc
+                  </button>
+                  <button
+                    onClick={() => orgContactsInputRef.current?.click()}
+                    disabled={isUploading}
+                    className="py-2.5 text-xs bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/60 text-white rounded border border-blue-500/40 transition-colors inline-flex items-center justify-center gap-1.5"
+                  >
+                    {isUploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
+                    Contacts CSV
+                  </button>
+                </div>
+                <input
+                  ref={orgThesisInputRef}
+                  type="file"
+                  accept=".txt,.md,.pdf,.csv"
+                  onChange={(event) => {
+                    void handleOrganizationKnowledgeUpload(event, 'thesis');
+                  }}
+                  className="hidden"
+                />
+                <input
+                  ref={orgContextInputRef}
+                  type="file"
+                  accept=".txt,.md,.pdf,.csv"
+                  onChange={(event) => {
+                    void handleOrganizationKnowledgeUpload(event, 'context');
+                  }}
+                  className="hidden"
+                />
+                <input
+                  ref={orgContactsInputRef}
+                  type="file"
+                  accept=".csv,.txt"
+                  onChange={(event) => {
+                    void handleContactsUpload(event);
+                  }}
+                  className="hidden"
+                />
               </div>
 
               <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">

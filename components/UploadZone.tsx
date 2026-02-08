@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { UploadCloud, CheckCircle, Loader2, Plus, Terminal, FileText, Database, Shield, X } from 'lucide-react';
 import { bridgeMemory } from '../services/bridgeMemory';
 import { debugError, debugInfo, debugWarn } from '../services/debugService';
+import { extractTextFromKnowledgeFile } from '../services/documentService';
 import { Contact, IngestionHistoryItem } from '../types';
 
 interface UploadZoneProps {
@@ -23,15 +24,6 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onIngestContacts, onThesisUpdat
     const contactInputRef = useRef<HTMLInputElement>(null);
     const thesisInputRef = useRef<HTMLInputElement>(null);
     const contextInputRef = useRef<HTMLInputElement>(null);
-
-    const processFile = (file: File, callback: (text: string) => void) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            const text = e.target?.result as string;
-            callback(text);
-        };
-        reader.readAsText(file);
-    };
 
     const handleContactFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -78,21 +70,33 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onIngestContacts, onThesisUpdat
         }
     };
 
-    const handleKnowledgeFile = (e: React.ChangeEvent<HTMLInputElement>, type: 'thesis' | 'context') => {
+    const handleKnowledgeFile = async (e: React.ChangeEvent<HTMLInputElement>, type: 'thesis' | 'context') => {
         const file = e.target.files?.[0];
         if (!file) return;
 
         debugInfo('upload', 'Knowledge file upload started.', { fileName: file.name, type });
         setIsProcessing(true);
-        processFile(file, (text) => {
-            bridgeMemory.ingestThesisDocument(text, file.name, type);
+        try {
+            const extracted = await extractTextFromKnowledgeFile(file);
+            bridgeMemory.ingestThesisDocument(extracted.text, file.name, type);
             onAddHistory(file.name, type === 'thesis' ? 'Thesis' : 'Context');
             onThesisUpdate();
-            debugInfo('upload', 'Knowledge file processed.', { fileName: file.name, type });
+            debugInfo('upload', 'Knowledge file processed.', {
+                fileName: file.name,
+                type,
+                fileType: extracted.fileType,
+                pageCount: extracted.pageCount,
+                rowCount: extracted.rowCount
+            });
+        } catch (err) {
+            console.error(err);
+            alert("Failed to parse knowledge file: " + (err instanceof Error ? err.message : String(err)));
+            debugError('upload', 'Knowledge file processing failed.', err);
+        } finally {
             setIsProcessing(false);
             if (type === 'thesis' && thesisInputRef.current) thesisInputRef.current.value = '';
             if (type === 'context' && contextInputRef.current) contextInputRef.current.value = '';
-        });
+        }
     };
 
     const handleManualSubmit = (text: string, type: 'thesis' | 'context') => {
@@ -173,11 +177,11 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onIngestContacts, onThesisUpdat
                                 type="file"
                                 ref={thesisInputRef}
                                 className="hidden"
-                                accept=".txt,.md,.pdf"
+                                accept=".txt,.md,.pdf,.csv"
                                 onChange={(e) => handleKnowledgeFile(e, 'thesis')}
                             />
                             <FileText size={16} className="text-slate-400" />
-                            <span className="text-sm text-slate-300">Upload Constitution (TXT)</span>
+                            <span className="text-sm text-slate-300">Upload Constitution (TXT/PDF/CSV)</span>
                         </div>
 
                         <div className="flex-1 relative">
@@ -220,11 +224,11 @@ const UploadZone: React.FC<UploadZoneProps> = ({ onIngestContacts, onThesisUpdat
                                 type="file"
                                 ref={contextInputRef}
                                 className="hidden"
-                                accept=".txt,.md,.pdf"
+                                accept=".txt,.md,.pdf,.csv"
                                 onChange={(e) => handleKnowledgeFile(e, 'context')}
                             />
                             <FileText size={16} className="text-slate-400" />
-                            <span className="text-sm text-slate-300">Upload Memos (TXT)</span>
+                            <span className="text-sm text-slate-300">Upload Memos (TXT/PDF/CSV)</span>
                         </div>
 
                         <div className="flex-1 relative">
