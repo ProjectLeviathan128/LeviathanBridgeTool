@@ -12,6 +12,12 @@ export interface EnrichmentQualityAssessment {
   issues: string[];
 }
 
+interface EnrichmentQualityOptions {
+  minEvidenceLinks?: number;
+  requireNonLinkedInSource?: boolean;
+  minIdentityConfidence?: number;
+}
+
 const VALID_TRACKS: Track[] = ['Investment', 'Government', 'Strategic Partner'];
 
 function clampNumber(value: unknown, fallback: number, min = 0, max = 100): number {
@@ -110,22 +116,30 @@ function hasNonLinkedInEvidence(evidenceLinks: Evidence[]): boolean {
   return evidenceLinks.some((ev) => !/(^|\.)linkedin\.com$/i.test(new URL(ev.url).hostname));
 }
 
-export function assessEnrichmentQuality(enrichment: EnrichmentData): EnrichmentQualityAssessment {
+export function assessEnrichmentQuality(
+  enrichment: EnrichmentData,
+  options: EnrichmentQualityOptions = {}
+): EnrichmentQualityAssessment {
   const issues: string[] = [];
   const evidenceCount = enrichment.evidenceLinks.length;
   const linkedInCount = enrichment.evidenceLinks.filter((ev) =>
     /(^|\.)linkedin\.com$/i.test(new URL(ev.url).hostname)
   ).length;
+  const minEvidenceLinks = typeof options.minEvidenceLinks === 'number' ? options.minEvidenceLinks : 2;
+  const minIdentityConfidence = typeof options.minIdentityConfidence === 'number' ? options.minIdentityConfidence : 60;
+  const requireNonLinkedInSource = typeof options.requireNonLinkedInSource === 'boolean'
+    ? options.requireNonLinkedInSource
+    : true;
 
-  if (evidenceCount < 2) {
-    issues.push('Insufficient external evidence (need at least 2 links).');
+  if (evidenceCount < minEvidenceLinks) {
+    issues.push(`Insufficient external evidence (need at least ${minEvidenceLinks} links).`);
   }
 
-  if (evidenceCount > 0 && linkedInCount === evidenceCount) {
+  if (requireNonLinkedInSource && evidenceCount > 0 && linkedInCount === evidenceCount) {
     issues.push('Evidence is only from LinkedIn; add at least one non-LinkedIn source.');
   }
 
-  if (enrichment.identityConfidence < 60) {
+  if (enrichment.identityConfidence < minIdentityConfidence) {
     issues.push('Low identity confidence.');
   }
 

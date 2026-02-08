@@ -196,7 +196,7 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
 
       <div className="px-4 py-3 bg-slate-900 border border-slate-800 rounded text-sm text-slate-300">
         <p className="font-medium text-white mb-1">How Organization Sharing Works</p>
-        <p>Thesis + strategic context sync when your teammate joins with your invite. Contact universes sync when each person imports an org package (or CSV) and dedupe runs.</p>
+        <p>Members, shared contacts, thesis, and strategic context sync automatically once teammates join the same organization invite.</p>
       </div>
 
       {orgMessage && (
@@ -545,7 +545,7 @@ const OrganizationHub: React.FC<OrganizationHubProps> = ({
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
             <h4 className="text-white font-semibold">Cross-Account Sync Package</h4>
             <p className="text-sm text-slate-400">
-              Export your organization + contacts as JSON and import your teammate&apos;s package to merge and dedupe.
+              Optional backup: export your organization + contacts as JSON and import another package to merge offline.
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <button

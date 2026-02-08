@@ -29,6 +29,13 @@ const SENDER_PROFILES: Record<OutreachSenderId, SenderProfile> = {
 
 const MODEL_CANDIDATES = ['gemini-2.5-pro', 'gemini-2.5-flash', 'openai/gpt-5.2-chat'];
 
+interface OutreachGenerationOptions {
+  linkedInMaxLength?: number;
+  emailSubjectMaxLength?: number;
+  modelCandidates?: string[];
+  temperature?: number;
+}
+
 function cleanWhitespace(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
@@ -92,16 +99,20 @@ function buildContactContext(contact: Contact): string {
 function buildFallbackDraft(
   contact: Contact,
   channel: OutreachChannel,
-  sender: SenderProfile
+  sender: SenderProfile,
+  options: OutreachGenerationOptions
 ): OutreachDraft {
+  const linkedInMaxLength = typeof options.linkedInMaxLength === 'number' ? options.linkedInMaxLength : 300;
+  const emailSubjectMaxLength = typeof options.emailSubjectMaxLength === 'number' ? options.emailSubjectMaxLength : 70;
   const angle = contact.enrichment?.recommendedAngle || 'exploring a fit with Leviathan';
   const callToAction = 'Open to a 20-minute call next week?';
-  const subject = `Leviathan x ${contact.name}`;
+  const subject = `Leviathan x ${contact.name}`.slice(0, emailSubjectMaxLength);
 
   if (channel === 'linkedin') {
     const message = clampLinkedIn(
       `Hi ${contact.name.split(' ')[0]}, ${sender.name} here (${sender.title}). ` +
-      `I’m reaching out because your work feels aligned with Leviathan. ${angle}. ${callToAction}`
+      `I’m reaching out because your work feels aligned with Leviathan. ${angle}. ${callToAction}`,
+      linkedInMaxLength
     );
     return {
       channel,
@@ -129,11 +140,18 @@ function buildFallbackDraft(
   };
 }
 
-function buildPrompt(contact: Contact, channel: OutreachChannel, sender: SenderProfile): string {
+function buildPrompt(
+  contact: Contact,
+  channel: OutreachChannel,
+  sender: SenderProfile,
+  options: OutreachGenerationOptions
+): string {
+  const linkedInMaxLength = typeof options.linkedInMaxLength === 'number' ? options.linkedInMaxLength : 300;
+  const emailSubjectMaxLength = typeof options.emailSubjectMaxLength === 'number' ? options.emailSubjectMaxLength : 70;
   const thesisContext = bridgeMemory.getThesisContext();
   const outputSpec = channel === 'linkedin'
-    ? 'Return JSON only: {"message":"..."} (HARD LIMIT: <= 300 characters, no markdown).'
-    : 'Return JSON only: {"subject":"...","message":"..."} (subject <= 70 chars, message can be longer if needed, no markdown).';
+    ? `Return JSON only: {"message":"..."} (HARD LIMIT: <= ${linkedInMaxLength} characters, no markdown).`
+    : `Return JSON only: {"subject":"...","message":"..."} (subject <= ${emailSubjectMaxLength} chars, message can be longer if needed, no markdown).`;
 
   return [
     'You are drafting high-conversion outreach for Leviathan.',
@@ -147,7 +165,9 @@ function buildPrompt(contact: Contact, channel: OutreachChannel, sender: SenderP
     '- Do not invent facts not present in the provided context.',
     '- Never mention "AI" or "generated".',
     '- Include a concrete CTA for a short call.',
-    channel === 'linkedin' ? '- Keep the message under 300 characters.' : '- For email include a strong concise subject.',
+    channel === 'linkedin'
+      ? `- Keep the message under ${linkedInMaxLength} characters.`
+      : `- For email include a strong concise subject under ${emailSubjectMaxLength} characters.`,
     '',
     'Leviathan Thesis and Context:',
     thesisContext,
@@ -166,10 +186,19 @@ export function getSenderProfile(senderId: OutreachSenderId): SenderProfile {
 export async function generateOutreachDraft(
   contact: Contact,
   channel: OutreachChannel,
-  senderId: OutreachSenderId
+  senderId: OutreachSenderId,
+  options: OutreachGenerationOptions = {}
 ): Promise<OutreachDraft> {
   const sender = getSenderProfile(senderId);
-  const prompt = buildPrompt(contact, channel, sender);
+  const prompt = buildPrompt(contact, channel, sender, options);
+  const linkedInMaxLength = typeof options.linkedInMaxLength === 'number' ? options.linkedInMaxLength : 300;
+  const emailSubjectMaxLength = typeof options.emailSubjectMaxLength === 'number' ? options.emailSubjectMaxLength : 70;
+  const modelCandidates = options.modelCandidates && options.modelCandidates.length > 0
+    ? options.modelCandidates
+    : MODEL_CANDIDATES;
+  const temperature = typeof options.temperature === 'number' && Number.isFinite(options.temperature)
+    ? Math.max(0, Math.min(1, options.temperature))
+    : 0.35;
 
   if (typeof puter === 'undefined' || !puter.ai?.chat) {
     debugWarn('outreach', 'Puter runtime unavailable; using fallback outreach draft.', {
@@ -177,19 +206,19 @@ export async function generateOutreachDraft(
       channel,
       senderId,
     });
-    return buildFallbackDraft(contact, channel, sender);
+    return buildFallbackDraft(contact, channel, sender, options);
   }
 
   let lastError: unknown = null;
-  for (const model of MODEL_CANDIDATES) {
+  for (const model of modelCandidates) {
     try {
-      const response = await puter.ai.chat(prompt, { model, temperature: 0.35 });
+      const response = await puter.ai.chat(prompt, { model, temperature });
       const responseText = readModelText(response);
       const json = extractJsonObject(responseText);
 
       if (channel === 'linkedin') {
         const messageSource = json?.message || responseText;
-        const message = clampLinkedIn(messageSource);
+        const message = clampLinkedIn(messageSource, linkedInMaxLength);
         const draft: OutreachDraft = {
           channel,
           senderId: sender.id,
@@ -214,7 +243,7 @@ export async function generateOutreachDraft(
         senderId: sender.id,
         senderName: sender.name,
         senderTitle: sender.title,
-        subject: subject.slice(0, 70),
+        subject: subject.slice(0, emailSubjectMaxLength),
         message,
         generatedAt: new Date().toISOString(),
       };
@@ -240,5 +269,5 @@ export async function generateOutreachDraft(
     senderId,
     error: lastError instanceof Error ? lastError.message : String(lastError),
   });
-  return buildFallbackDraft(contact, channel, sender);
+  return buildFallbackDraft(contact, channel, sender, options);
 }

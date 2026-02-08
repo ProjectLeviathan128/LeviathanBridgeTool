@@ -29,7 +29,7 @@ const ContactList: React.FC<ContactListProps> = ({
         status: 'All' as string,
         track: 'All' as string,
         location: '',
-        source: '',
+        sourceLabel: 'All' as string,
         minInvestorScore: 0,
         minValuesScore: 0,
         minGovtScore: 0,
@@ -48,6 +48,15 @@ const ContactList: React.FC<ContactListProps> = ({
             });
         });
         return Array.from(names).sort((a, b) => a.localeCompare(b));
+    }, [contacts]);
+
+    const allSources = useMemo(() => {
+        const labels = new Set<string>();
+        contacts.forEach(contact => {
+            const label = contact.ingestionMeta.sourceLabel?.trim();
+            if (label) labels.add(label);
+        });
+        return Array.from(labels).sort((a, b) => a.localeCompare(b));
     }, [contacts]);
 
     // Intelligent Filtering Logic
@@ -76,8 +85,8 @@ const ContactList: React.FC<ContactListProps> = ({
             // 4. Location Filter (Partial Match)
             if (filters.location && !c.location.toLowerCase().includes(filters.location.toLowerCase())) return false;
 
-            // 5. Source Filter (Partial Match)
-            if (filters.source && !c.ingestionMeta.sourceLabel.toLowerCase().includes(filters.source.toLowerCase())) return false;
+            // 5. Source Filter (Exact source label)
+            if (filters.sourceLabel !== 'All' && c.ingestionMeta.sourceLabel !== filters.sourceLabel) return false;
 
             // 6. Boolean Flags
             if (filters.hasNotes && !c.rawText) return false;
@@ -101,7 +110,7 @@ const ContactList: React.FC<ContactListProps> = ({
         (filters.status !== 'All' ? 1 : 0) +
         (filters.track !== 'All' ? 1 : 0) +
         (filters.location ? 1 : 0) +
-        (filters.source ? 1 : 0) +
+        (filters.sourceLabel !== 'All' ? 1 : 0) +
         (listFilter !== 'All' ? 1 : 0) +
         (filters.hasNotes ? 1 : 0) +
         (filters.isFlagged ? 1 : 0) +
@@ -116,7 +125,7 @@ const ContactList: React.FC<ContactListProps> = ({
             status: 'All',
             track: 'All',
             location: '',
-            source: '',
+            sourceLabel: 'All',
             minInvestorScore: 0,
             minValuesScore: 0,
             minGovtScore: 0,
@@ -164,10 +173,19 @@ const ContactList: React.FC<ContactListProps> = ({
     };
 
     const handleBulkFlag = (flagged: boolean) => {
-        applyUpdatesToSelected(contact => ({ ...contact, teamFlagged: flagged }));
+        const changedAt = new Date().toISOString();
+        applyUpdatesToSelected(contact => ({
+            ...contact,
+            teamFlagged: flagged,
+            collaboration: {
+                ...(contact.collaboration || {}),
+                teamFlaggedUpdatedAt: changedAt
+            }
+        }));
     };
 
     const handleBulkIntroQueue = (requested: boolean) => {
+        const changedAt = new Date().toISOString();
         applyUpdatesToSelected(contact => {
             const lists = new Set((contact.lists || []).map(list => list.trim()).filter(Boolean));
             if (requested) {
@@ -179,7 +197,12 @@ const ContactList: React.FC<ContactListProps> = ({
                 ...contact,
                 lists: Array.from(lists),
                 introRequested: requested,
-                introRequestedAt: requested ? (contact.introRequestedAt || new Date().toISOString()) : undefined
+                introRequestedAt: requested ? (contact.introRequestedAt || changedAt) : undefined,
+                collaboration: {
+                    ...(contact.collaboration || {}),
+                    introUpdatedAt: changedAt,
+                    listsUpdatedAt: changedAt
+                }
             };
         });
     };
@@ -187,10 +210,15 @@ const ContactList: React.FC<ContactListProps> = ({
     const handleBulkAddToList = () => {
         const normalized = listInput.trim();
         if (!normalized) return;
+        const changedAt = new Date().toISOString();
 
         applyUpdatesToSelected(contact => ({
             ...contact,
-            lists: [...new Set([...(contact.lists || []), normalized])]
+            lists: [...new Set([...(contact.lists || []), normalized])],
+            collaboration: {
+                ...(contact.collaboration || {}),
+                listsUpdatedAt: changedAt
+            }
         }));
 
         setListInput('');
@@ -206,7 +234,15 @@ const ContactList: React.FC<ContactListProps> = ({
     };
 
     const handleToggleSingleFlag = (contact: Contact) => {
-        onBatchUpdateContacts([{ ...contact, teamFlagged: !contact.teamFlagged }]);
+        const changedAt = new Date().toISOString();
+        onBatchUpdateContacts([{
+            ...contact,
+            teamFlagged: !contact.teamFlagged,
+            collaboration: {
+                ...(contact.collaboration || {}),
+                teamFlaggedUpdatedAt: changedAt
+            }
+        }]);
     };
 
     const handleDeleteSingle = (contact: Contact) => {
@@ -540,13 +576,16 @@ const ContactList: React.FC<ContactListProps> = ({
                             </div>
                             <div>
                                 <label className="text-xs font-semibold text-slate-400 uppercase mb-2 block">Source / Upload</label>
-                                <input
-                                    type="text"
-                                    placeholder="e.g. Feb_Import.csv..."
+                                <select
                                     className="w-full bg-slate-800 border border-slate-700 rounded p-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
-                                    value={filters.source}
-                                    onChange={(e) => setFilters(prev => ({ ...prev, source: e.target.value }))}
-                                />
+                                    value={filters.sourceLabel}
+                                    onChange={(e) => setFilters(prev => ({ ...prev, sourceLabel: e.target.value }))}
+                                >
+                                    <option value="All">All Sources</option>
+                                    {allSources.map(source => (
+                                        <option key={source} value={source}>{source}</option>
+                                    ))}
+                                </select>
                             </div>
                         </div>
 

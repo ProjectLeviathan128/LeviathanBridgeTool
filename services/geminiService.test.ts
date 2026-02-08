@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppSettings, Contact } from '../types';
 import { analyzeContactWithGemini } from './geminiService';
+import { createDefaultSettings } from './settingsService';
 
 const baseContact: Contact = {
   id: 'contact-1',
@@ -19,8 +20,9 @@ const baseContact: Contact = {
 };
 
 const settings: AppSettings = {
+  ...createDefaultSettings(),
   focusMode: 'BALANCED',
-  analysisModel: 'quality',
+  analysisModel: 'quality'
 };
 
 function score(scoreValue: number) {

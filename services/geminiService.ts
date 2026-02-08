@@ -217,7 +217,6 @@ function buildCompatibilityRetryOptions(options: PuterChatOptions, error: unknow
 }
 
 const WEB_SEARCH_MODEL = 'openai/gpt-5.2-chat';
-const MIN_VERIFIED_EVIDENCE = 2;
 const DEFAULT_ANALYSIS_MODELS_FAST = ['gemini-2.5-flash', 'openai/gpt-5-nano'];
 const DEFAULT_ANALYSIS_MODELS_QUALITY = ['gemini-2.5-pro', 'gemini-2.5-flash', WEB_SEARCH_MODEL];
 const DEFAULT_EVIDENCE_MODELS = [WEB_SEARCH_MODEL, 'gemini-2.5-pro', 'gemini-2.5-flash'];
@@ -535,8 +534,11 @@ interface EvidenceGateResult {
     issues: string[];
 }
 
-function evaluateEvidenceGate(verifiedEvidence: Evidence[]): EvidenceGateResult {
+function evaluateEvidenceGate(verifiedEvidence: Evidence[], settings: AppSettings): EvidenceGateResult {
     const issues: string[] = [];
+    const minEvidenceLinks = settings.analysis.minEvidenceLinks;
+    const minDistinctDomains = settings.analysis.minDistinctDomains;
+    const requireNonLinkedInSource = settings.analysis.requireNonLinkedInSource;
     const hostnames = Array.from(
         new Set(
             verifiedEvidence
@@ -545,16 +547,16 @@ function evaluateEvidenceGate(verifiedEvidence: Evidence[]): EvidenceGateResult 
         )
     );
 
-    if (verifiedEvidence.length < MIN_VERIFIED_EVIDENCE) {
-        issues.push(`Insufficient external evidence (need at least ${MIN_VERIFIED_EVIDENCE} verified links).`);
+    if (verifiedEvidence.length < minEvidenceLinks) {
+        issues.push(`Insufficient external evidence (need at least ${minEvidenceLinks} verified links).`);
     }
 
-    if (hostnames.length < 2 && verifiedEvidence.length > 0) {
-        issues.push('Evidence lacks source diversity (need at least 2 distinct domains).');
+    if (hostnames.length < minDistinctDomains && verifiedEvidence.length > 0) {
+        issues.push(`Evidence lacks source diversity (need at least ${minDistinctDomains} distinct domains).`);
     }
 
     const hasNonLinkedInSource = hostnames.some((host) => !/(^|\.)linkedin\.com$/i.test(host));
-    if (verifiedEvidence.length > 0 && !hasNonLinkedInSource) {
+    if (requireNonLinkedInSource && verifiedEvidence.length > 0 && !hasNonLinkedInSource) {
         issues.push('Evidence is only from LinkedIn; add at least one non-LinkedIn source.');
     }
 
@@ -606,26 +608,29 @@ async function verifyUrlReachable(url: string): Promise<boolean> {
     }
 }
 
-async function verifyEvidenceLinks(evidenceLinks: Evidence[]): Promise<Evidence[]> {
+async function verifyEvidenceLinks(evidenceLinks: Evidence[], maxEvidenceLinks: number): Promise<Evidence[]> {
     const runtime = getPuterRuntime();
     if (!runtime?.net?.fetch) {
         // Runtime URL checks are unavailable in some browser contexts.
         // Keep normalized links so enrichment can continue instead of hard-blocking.
-        return evidenceLinks.slice(0, 8);
+        return evidenceLinks.slice(0, maxEvidenceLinks);
     }
 
     const checks = await Promise.all(
-        evidenceLinks.slice(0, 8).map(async (ev) => {
+        evidenceLinks.slice(0, maxEvidenceLinks).map(async (ev) => {
             const reachable = await verifyUrlReachable(ev.url);
             return reachable ? ev : null;
         })
     );
     const verified = checks.filter((ev): ev is Evidence => Boolean(ev));
-    return verified.length > 0 ? verified : evidenceLinks.slice(0, 8);
+    return verified.length > 0 ? verified : evidenceLinks.slice(0, maxEvidenceLinks);
 }
 
-async function gatherWebEvidenceForContact(contact: Contact): Promise<EvidenceCollectionResult> {
+async function gatherWebEvidenceForContact(contact: Contact, settings: AppSettings): Promise<EvidenceCollectionResult> {
     const linkedInSeed = extractLinkedInUrlFromContact(contact);
+    const minEvidenceLinks = settings.analysis.minEvidenceLinks;
+    const maxEvidenceLinks = settings.analysis.maxEvidenceLinks;
+    const targetEvidenceCount = Math.max(minEvidenceLinks, Math.min(maxEvidenceLinks, minEvidenceLinks + 2));
     const evidencePrompt = `
 You are conducting contact due diligence.
 Use web search to find verifiable public evidence for this person.
@@ -640,7 +645,7 @@ Target:
 
 Rules:
 - Return ONLY a JSON array.
-- Include 3 to 6 evidence objects.
+- Include ${minEvidenceLinks} to ${targetEvidenceCount} evidence objects.
 - Prefer one LinkedIn URL (if present) and multiple non-LinkedIn sources.
 - No placeholders. No guessed or fake URLs.
 
@@ -715,7 +720,7 @@ Schema:
 
         if (candidateEvidence.length === 0) {
             candidateEvidence = extractHttpUrls(responseText)
-                .slice(0, 6)
+                .slice(0, maxEvidenceLinks)
                 .map((url) => ({
                     claim: `Source discovered during web due diligence for ${contact.name}.`,
                     url,
@@ -733,7 +738,7 @@ Schema:
             });
         }
 
-        const verifiedEvidence = await verifyEvidenceLinks(candidateEvidence);
+        const verifiedEvidence = await verifyEvidenceLinks(candidateEvidence, maxEvidenceLinks);
         debugInfo('evidence', 'Evidence gathering complete.', {
             contactId: contact.id,
             candidateCount: candidateEvidence.length,
@@ -826,7 +831,7 @@ export async function analyzeContactWithGemini(
         focusMode: settings.focusMode,
         analysisMode: settings.analysisModel
     });
-    const evidenceCollection = await gatherWebEvidenceForContact(contact);
+    const evidenceCollection = await gatherWebEvidenceForContact(contact, settings);
     const verifiedEvidence = evidenceCollection.verifiedEvidence;
 
     if (evidenceCollection.failure && verifiedEvidence.length === 0) {
@@ -904,7 +909,7 @@ Analyze this contact and return a JSON object with the following structure. DO N
 `;
 
     try {
-        const evidenceGate = evaluateEvidenceGate(verifiedEvidence);
+        const evidenceGate = evaluateEvidenceGate(verifiedEvidence, settings);
         if (!evidenceGate.passed) {
             debugWarn('analysis', 'Evidence gate blocked analysis.', {
                 contactId: contact.id,

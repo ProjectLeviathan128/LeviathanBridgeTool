@@ -24,6 +24,7 @@ import {
   saveOrganizationWorkspaceToCloudDebounced
 } from './services/storageService';
 import { debugError, debugInfo, debugWarn } from './services/debugService';
+import { createDefaultSettings } from './services/settingsService';
 import {
   INTRO_REQUEST_LIST,
   createOrganization,
@@ -90,7 +91,7 @@ function normalizeListValues(lists: string[] | undefined): string[] {
   return [...new Set((lists || []).map((list) => list.trim()).filter(Boolean))];
 }
 
-function setContactIntroRequest(contact: Contact, requested: boolean): Contact {
+function setContactIntroRequest(contact: Contact, requested: boolean, changedAt = new Date().toISOString()): Contact {
   const normalizedLists = normalizeListValues(contact.lists);
   const nextLists = requested
     ? [...new Set([...normalizedLists, INTRO_REQUEST_LIST])]
@@ -101,17 +102,82 @@ function setContactIntroRequest(contact: Contact, requested: boolean): Contact {
     lists: nextLists,
     introRequested: requested,
     introRequestedAt: requested ? (contact.introRequestedAt || new Date().toISOString()) : undefined,
+    collaboration: {
+      ...(contact.collaboration || {}),
+      introUpdatedAt: changedAt,
+      listsUpdatedAt: changedAt,
+    },
+  };
+}
+
+function setContactTeamFlag(contact: Contact, flagged: boolean, changedAt = new Date().toISOString()): Contact {
+  return {
+    ...contact,
+    teamFlagged: flagged,
+    collaboration: {
+      ...(contact.collaboration || {}),
+      teamFlaggedUpdatedAt: changedAt,
+    },
   };
 }
 
 function normalizeContactCollaboration(contact: Contact): Contact {
   const normalizedLists = normalizeListValues(contact.lists);
   const hasIntroList = normalizedLists.includes(INTRO_REQUEST_LIST);
-  const introRequested = Boolean(contact.introRequested || hasIntroList);
-  return setContactIntroRequest(
-    { ...contact, lists: normalizedLists, introRequested, introRequestedAt: contact.introRequestedAt },
-    introRequested
-  );
+  const introRequested = typeof contact.introRequested === 'boolean'
+    ? contact.introRequested
+    : hasIntroList;
+  const lists = introRequested
+    ? [...new Set([...normalizedLists.filter((list) => list !== INTRO_REQUEST_LIST), INTRO_REQUEST_LIST])]
+    : normalizedLists.filter((list) => list !== INTRO_REQUEST_LIST);
+  const collaboration = contact.collaboration && (
+    contact.collaboration.introUpdatedAt ||
+    contact.collaboration.listsUpdatedAt ||
+    contact.collaboration.teamFlaggedUpdatedAt
+  )
+    ? contact.collaboration
+    : undefined;
+
+  return {
+    ...contact,
+    lists,
+    introRequested,
+    introRequestedAt: introRequested ? contact.introRequestedAt : undefined,
+    collaboration,
+  };
+}
+
+function mergeOrganizationRecords(local: Organization, remote: Organization): Organization {
+  const newer = remote.updatedAt >= local.updatedAt ? remote : local;
+  const older = newer === remote ? local : remote;
+  const memberMap = new Map<string, OrganizationMember>();
+  older.members.forEach(member => memberMap.set(member.userId, member));
+  newer.members.forEach(member => memberMap.set(member.userId, member));
+
+  return {
+    ...newer,
+    members: Array.from(memberMap.values()),
+    invitePin: newer.invitePin || older.invitePin,
+    inviteCode: newer.inviteCode || older.inviteCode,
+    updatedAt: Math.max(local.updatedAt, remote.updatedAt),
+  };
+}
+
+function organizationSnapshotKey(org: Organization): string {
+  const members = [...org.members]
+    .map((member) => `${member.userId}|${member.username}|${member.email || ''}|${member.role}|${member.joinedAt}`)
+    .sort()
+    .join('||');
+  return [
+    org.id,
+    org.name,
+    org.thesis,
+    org.strategicContext,
+    org.ownerId,
+    org.invitePin || '',
+    org.updatedAt.toString(),
+    members,
+  ].join('::');
 }
 
 function mergeKnowledgeChunks(
@@ -156,10 +222,7 @@ const App: React.FC = () => {
   const [thesisVersion, setThesisVersion] = useState(0);
 
   // Settings
-  const [settings, setSettings] = useState<AppSettings>({
-    focusMode: 'BALANCED',
-    analysisModel: 'quality',
-  });
+  const [settings, setSettings] = useState<AppSettings>(() => createDefaultSettings());
 
   // Auth state
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -174,6 +237,7 @@ const App: React.FC = () => {
   const [orgMessage, setOrgMessage] = useState<string | null>(null);
   const orgContextIdRef = useRef<string | null>(null);
   const orgWorkspaceLoadedRef = useRef<string | null>(null);
+  const orgRefreshInFlightRef = useRef(false);
 
   // Logout confirmation modal
   const [showLogoutModal, setShowLogoutModal] = useState(false);
@@ -292,7 +356,7 @@ const App: React.FC = () => {
       updatedAt: Date.now()
     }]);
     setActiveThreadId('default');
-    setSettings({ focusMode: 'BALANCED', analysisModel: 'quality' });
+    setSettings(createDefaultSettings());
     setSyncState({ status: 'idle', lastSyncedAt: null });
     setIngestionHistory([]);
     setOrganization(null);
@@ -362,42 +426,42 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!isSynced) return;
     saveContactsDebounced(contacts);
-    if (user) saveToCloudDebounced();
-  }, [contacts, isSynced, user]);
+    if (user && settings.automation.autoSyncToCloud) saveToCloudDebounced();
+  }, [contacts, isSynced, settings.automation.autoSyncToCloud, user]);
 
   // Persist threads when they change (Local + Cloud)
   useEffect(() => {
     if (!isSynced) return;
     saveThreadsDebounced(threads);
-    if (user) saveToCloudDebounced();
-  }, [threads, isSynced, user]);
+    if (user && settings.automation.autoSyncToCloud) saveToCloudDebounced();
+  }, [threads, isSynced, settings.automation.autoSyncToCloud, user]);
 
   // Persist settings when they change (Local + Cloud)
   useEffect(() => {
     if (!isSynced) return;
     saveSettings(settings);
-    if (user) saveToCloudDebounced();
-  }, [settings, isSynced, user]);
+    if (user && settings.automation.autoSyncToCloud) saveToCloudDebounced();
+  }, [settings, isSynced, settings.automation.autoSyncToCloud, user]);
 
   // Persist organization when it changes (Local + Cloud)
   useEffect(() => {
     if (!isSynced) return;
     saveOrganizationDebounced(organization);
-    if (user) saveToCloudDebounced();
-  }, [organization, isSynced, user]);
+    if (user && settings.automation.autoSyncToCloud) saveToCloudDebounced();
+  }, [organization, isSynced, settings.automation.autoSyncToCloud, user]);
 
   // Persist ingestion history when it changes (Local + Cloud)
   useEffect(() => {
     if (!isSynced) return;
     saveIngestionHistoryDebounced(ingestionHistory);
-    if (user) saveToCloudDebounced();
-  }, [ingestionHistory, isSynced, user]);
+    if (user && settings.automation.autoSyncToCloud) saveToCloudDebounced();
+  }, [ingestionHistory, isSynced, settings.automation.autoSyncToCloud, user]);
 
   // Trigger cloud sync after thesis/context changes
   useEffect(() => {
-    if (!isSynced || !user) return;
+    if (!isSynced || !user || !settings.automation.autoSyncToCloud) return;
     saveToCloudDebounced();
-  }, [thesisVersion, isSynced, user]);
+  }, [thesisVersion, isSynced, settings.automation.autoSyncToCloud, user]);
 
   useEffect(() => {
     if (!user || !organization) return;
@@ -438,12 +502,14 @@ const App: React.FC = () => {
       if (cancelled) return;
 
       if (remote) {
-        const syncedOrganization = upsertOrganizationMember(remote.organization, currentUserMember);
-        const mergedContacts = mergeContactsWithDedupe(remote.contacts, localContacts).contacts;
-        const mergedKnowledge = mergeKnowledgeChunks(remote.knowledge, localKnowledge);
-        const mergedHistory = mergeIngestionHistoryItems(remote.ingestionHistory, localHistory);
+        const mergedOrganization = mergeOrganizationRecords(organization, remote.organization);
+        const syncedOrganization = upsertOrganizationMember(mergedOrganization, currentUserMember);
+        const mergedContacts = mergeContactsWithDedupe(localContacts, remote.contacts).contacts;
+        const mergedKnowledge = mergeKnowledgeChunks(localKnowledge, remote.knowledge);
+        const mergedHistory = mergeIngestionHistoryItems(localHistory, remote.ingestionHistory);
 
         setContacts(mergedContacts);
+        setSelectedContact(prev => (prev ? mergedContacts.find(contact => contact.id === prev.id) || null : null));
         setIngestionHistory(mergedHistory);
         bridgeMemory.initialize(mergedKnowledge);
         setThesisVersion(v => v + 1);
@@ -488,6 +554,81 @@ const App: React.FC = () => {
     };
   }, [isSynced, user, organization?.id]);
 
+  const refreshOrganizationWorkspaceFromCloud = useCallback(async () => {
+    if (!isSynced || !user || !organization) return;
+    if (orgWorkspaceLoadedRef.current !== organization.id) return;
+    if (orgRefreshInFlightRef.current) return;
+
+    orgRefreshInFlightRef.current = true;
+    try {
+      const role: 'owner' | 'member' = organization.ownerId === (user.uuid || user.username) ? 'owner' : 'member';
+      const currentUserMember = toOrganizationMember(user, role);
+      const remote = await loadOrganizationWorkspaceFromCloud(organization.id);
+      if (!remote) return;
+
+      const localKnowledge = bridgeMemory.getAllChunks();
+      const mergedOrganization = upsertOrganizationMember(
+        mergeOrganizationRecords(organization, remote.organization),
+        currentUserMember
+      );
+      const contactMerge = mergeContactsWithDedupe(contacts, remote.contacts);
+      const mergedKnowledge = mergeKnowledgeChunks(localKnowledge, remote.knowledge);
+      const mergedHistory = mergeIngestionHistoryItems(ingestionHistory, remote.ingestionHistory);
+
+      const organizationChanged = organizationSnapshotKey(mergedOrganization) !== organizationSnapshotKey(organization);
+      const contactsChanged = contactMerge.added > 0 || contactMerge.merged > 0;
+      const knowledgeChanged = mergedKnowledge.length !== localKnowledge.length;
+      const historyChanged = mergedHistory.length !== ingestionHistory.length;
+
+      if (!organizationChanged && !contactsChanged && !knowledgeChanged && !historyChanged) return;
+
+      if (contactsChanged) {
+        setContacts(contactMerge.contacts);
+        setSelectedContact(prev => (prev ? contactMerge.contacts.find(contact => contact.id === prev.id) || null : null));
+      }
+      if (historyChanged) setIngestionHistory(mergedHistory);
+      if (knowledgeChanged) {
+        bridgeMemory.initialize(mergedKnowledge);
+        setThesisVersion(v => v + 1);
+      }
+      if (organizationChanged) {
+        setOrganization(mergedOrganization);
+        syncOrganizationContext(mergedOrganization);
+      }
+
+      if (mergedOrganization.members.length > organization.members.length) {
+        setOrgMessage(`A teammate joined "${mergedOrganization.name}". Members now: ${mergedOrganization.members.length}.`);
+      } else if (contactMerge.added > 0) {
+        setOrgMessage(`Synced ${contactMerge.added} new shared contact${contactMerge.added === 1 ? '' : 's'} from "${mergedOrganization.name}".`);
+      }
+    } catch (e) {
+      debugError('organization', 'Organization workspace refresh failed.', e);
+    } finally {
+      orgRefreshInFlightRef.current = false;
+    }
+  }, [contacts, ingestionHistory, isSynced, organization, syncOrganizationContext, user]);
+
+  useEffect(() => {
+    if (!isSynced || !user || !organization) return;
+    if (orgWorkspaceLoadedRef.current !== organization.id) return;
+
+    void refreshOrganizationWorkspaceFromCloud();
+    const handleForegroundRefresh = () => {
+      void refreshOrganizationWorkspaceFromCloud();
+    };
+    window.addEventListener('focus', handleForegroundRefresh);
+    document.addEventListener('visibilitychange', handleForegroundRefresh);
+    const intervalId = window.setInterval(() => {
+      void refreshOrganizationWorkspaceFromCloud();
+    }, 3000);
+
+    return () => {
+      window.removeEventListener('focus', handleForegroundRefresh);
+      document.removeEventListener('visibilitychange', handleForegroundRefresh);
+      window.clearInterval(intervalId);
+    };
+  }, [isSynced, user, organization?.id, refreshOrganizationWorkspaceFromCloud]);
+
   useEffect(() => {
     if (!isSynced || !user || !organization) return;
     if (orgWorkspaceLoadedRef.current !== organization.id) return;
@@ -513,12 +654,16 @@ const App: React.FC = () => {
       const remote = await loadOrganizationWorkspaceFromCloud(organization.id);
 
       if (remote) {
-        const syncedOrganization = upsertOrganizationMember(remote.organization, currentUserMember);
-        const mergedContacts = mergeContactsWithDedupe(remote.contacts, contacts).contacts;
-        const mergedKnowledge = mergeKnowledgeChunks(remote.knowledge, bridgeMemory.getAllChunks());
-        const mergedHistory = mergeIngestionHistoryItems(remote.ingestionHistory, ingestionHistory);
+        const syncedOrganization = upsertOrganizationMember(
+          mergeOrganizationRecords(organization, remote.organization),
+          currentUserMember
+        );
+        const mergedContacts = mergeContactsWithDedupe(contacts, remote.contacts).contacts;
+        const mergedKnowledge = mergeKnowledgeChunks(bridgeMemory.getAllChunks(), remote.knowledge);
+        const mergedHistory = mergeIngestionHistoryItems(ingestionHistory, remote.ingestionHistory);
 
         setContacts(mergedContacts);
+        setSelectedContact(prev => (prev ? mergedContacts.find(contact => contact.id === prev.id) || null : null));
         setIngestionHistory(mergedHistory);
         bridgeMemory.initialize(mergedKnowledge);
         setThesisVersion(v => v + 1);
@@ -646,29 +791,31 @@ const App: React.FC = () => {
   };
 
   const handleToggleTeamFlag = (contactId: string) => {
+    const changedAt = new Date().toISOString();
     setContacts(prev => prev.map(contact => (
       contact.id === contactId
-        ? { ...contact, teamFlagged: !contact.teamFlagged }
+        ? setContactTeamFlag(contact, !contact.teamFlagged, changedAt)
         : contact
     )));
 
     setSelectedContact(prev => (
       prev && prev.id === contactId
-        ? { ...prev, teamFlagged: !prev.teamFlagged }
+        ? setContactTeamFlag(prev, !prev.teamFlagged, changedAt)
         : prev
     ));
   };
 
   const handleToggleIntroRequest = (contactId: string) => {
+    const changedAt = new Date().toISOString();
     setContacts(prev => prev.map(contact => (
       contact.id === contactId
-        ? setContactIntroRequest(contact, !contact.introRequested)
+        ? setContactIntroRequest(contact, !contact.introRequested, changedAt)
         : contact
     )));
 
     setSelectedContact(prev => (
       prev && prev.id === contactId
-        ? setContactIntroRequest(prev, !prev.introRequested)
+        ? setContactIntroRequest(prev, !prev.introRequested, changedAt)
         : prev
     ));
   };
@@ -701,7 +848,9 @@ const App: React.FC = () => {
     const normalizedContacts = newContacts.map(normalizeContactCollaboration);
     const mergeResult = mergeContactsWithDedupe(contacts, normalizedContacts);
     setContacts(mergeResult.contacts);
-    setActiveTab('contacts'); // Auto-switch to list view
+    if (settings.automation.autoSwitchToContactsOnIngest) {
+      setActiveTab('contacts');
+    }
     if (mergeResult.duplicates > 0) {
       setOrgMessage(
         `Ingestion dedupe: ${mergeResult.added} new contacts, ${mergeResult.duplicates} duplicates merged.`
@@ -820,7 +969,7 @@ const App: React.FC = () => {
     orgWorkspaceLoadedRef.current = null;
     setOrganization(nextOrg);
     syncOrganizationContext(nextOrg);
-    setOrgMessage(`Joined "${nextOrg.name}". Organization thesis/context is now shared. Contacts merge when you import a package or CSV and run dedupe.`);
+    setOrgMessage(`Joined "${nextOrg.name}". Shared members, contacts, and context now sync automatically across teammates.`);
     debugInfo('organization', 'Organization joined via invite.', {
       id: nextOrg.id,
       member: joiningMember.userId
@@ -1083,6 +1232,7 @@ const App: React.FC = () => {
         return (
           <Dashboard
             contacts={contacts}
+            settings={settings}
             organization={organization}
             onSelectContact={handleOpenContactFromDashboard}
             onDeleteContact={handleDeleteContact}

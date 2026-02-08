@@ -67,6 +67,12 @@ export interface OutreachDraft {
   generatedAt: string;
 }
 
+export interface ContactCollaborationState {
+  listsUpdatedAt?: string;
+  teamFlaggedUpdatedAt?: string;
+  introUpdatedAt?: string;
+}
+
 export interface Contact {
   id: string;
   name: string;
@@ -78,6 +84,7 @@ export interface Contact {
   teamFlagged?: boolean; // manual team flag for follow-up
   introRequested?: boolean; // mark this contact for team intro workflow
   introRequestedAt?: string; // timestamp when intro request was created
+  collaboration?: ContactCollaborationState; // sync metadata for collaborative list/flag edits
   outreachDrafts?: OutreachDraft[];
   rawText?: string;
   status: 'New' | 'Enriched' | 'Review Needed' | 'Discarded';
@@ -102,6 +109,45 @@ export type StrategicFocus = 'BALANCED' | 'GATEKEEPER' | 'DEAL_HUNTER' | 'GOVT_I
 export interface AppSettings {
   focusMode: StrategicFocus;
   analysisModel: 'fast' | 'quality'; // 'fast' -> gemini-3-flash, 'quality' -> gemini-3-pro
+  analysis: {
+    minEvidenceLinks: number;
+    maxEvidenceLinks: number;
+    minDistinctDomains: number;
+    requireNonLinkedInSource: boolean;
+    minIdentityConfidence: number;
+    highPriorityScoreThreshold: number;
+  };
+  chat: {
+    searchResultLimit: number;
+    searchSnippetLength: number;
+    enrichmentBatchSize: number;
+    enrichmentDelayMs: number;
+    showGroundingSources: boolean;
+  };
+  outreach: {
+    defaultChannel: OutreachChannel;
+    defaultSender: OutreachSenderId;
+    maxDraftsPerContact: number;
+    linkedInCharacterLimit: number;
+    emailSubjectMaxLength: number;
+    modelTemperature: number;
+  };
+  dashboard: {
+    priorityQueueSize: number;
+    riskQueueSize: number;
+    highValueInvestorMin: number;
+    highValueValuesMin: number;
+    highValueConnectorMin: number;
+    riskLowConfidenceThreshold: number;
+  };
+  automation: {
+    autoSwitchToContactsOnIngest: boolean;
+    autoSyncToCloud: boolean;
+    autoOpenDebugOnFailure: boolean;
+  };
+  sync: {
+    confirmBeforePull: boolean;
+  };
 }
 
 export interface IngestionHistoryItem {

@@ -47,6 +47,12 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     const activeThread = threads.find(t => t.id === activeThreadId) || threads[0];
+    const searchResultLimit = settings.chat.searchResultLimit;
+    const searchSnippetLength = settings.chat.searchSnippetLength;
+    const enrichmentBatchSize = settings.chat.enrichmentBatchSize;
+    const enrichmentDelayMs = settings.chat.enrichmentDelayMs;
+    const autoOpenDebugOnFailure = settings.automation.autoOpenDebugOnFailure;
+    const showGroundingSources = settings.chat.showGroundingSources;
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -206,15 +212,17 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                         .map(m => m.contact);
                     debugInfo('chat.tool', 'Search completed.', { query, matches: matches.length });
 
-                    // Limit to top 20 results to fit in context
-                    const topMatches = matches.slice(0, 20).map(c => ({
+                    // Limit search response size to control context window size.
+                    const topMatches = matches.slice(0, searchResultLimit).map(c => ({
                         id: c.id,
                         name: c.name,
                         headline: c.headline,
                         location: c.location,
                         status: c.status,
                         // Include snippets of raw text for context
-                        notes: c.rawText ? c.rawText.slice(0, 300) + (c.rawText.length > 300 ? '...' : '') : 'No notes'
+                        notes: c.rawText
+                            ? c.rawText.slice(0, searchSnippetLength) + (c.rawText.length > searchSnippetLength ? '...' : '')
+                            : 'No notes'
                     }));
 
                     const toolResponse = [{
@@ -223,7 +231,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                             response: {
                                 count: matches.length,
                                 topResults: topMatches,
-                                message: matches.length > 20 ? `Showing top 20 of ${matches.length} matches.` : `Found ${matches.length} matches.`
+                                message: matches.length > searchResultLimit
+                                    ? `Showing top ${searchResultLimit} of ${matches.length} matches.`
+                                    : `Found ${matches.length} matches.`
                             },
                             id: searchCall.id
                         }
@@ -247,8 +257,8 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                     const args = enrichCall.args as any;
                     // ... (keep existing enrich logic exactly as is, just wrapped in else if)
                     let contactIds = args?.contactIds || [];
-                    // RATE LIMIT: Max 3 contacts per batch to avoid API overload
-                    const MAX_BATCH_SIZE = 3;
+                    // Rate-limit batch size to avoid provider overload in one run.
+                    const MAX_BATCH_SIZE = enrichmentBatchSize;
                     if (contactIds.length > MAX_BATCH_SIZE) {
                         contactIds = contactIds.slice(0, MAX_BATCH_SIZE);
                     }
@@ -256,7 +266,6 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                         threadId: currentThreadId,
                         count: contactIds.length
                     });
-                    requestDebugPanelOpen();
 
                     // Update Status to "Tool Use"
                     updateThread(currentThreadId, {
@@ -331,7 +340,11 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                                 }));
 
                                 const analysis = await analyzeContactWithGemini(contact, settings);
-                                const quality = assessEnrichmentQuality(analysis.enrichment);
+                                const quality = assessEnrichmentQuality(analysis.enrichment, {
+                                    minEvidenceLinks: settings.analysis.minEvidenceLinks,
+                                    requireNonLinkedInSource: settings.analysis.requireNonLinkedInSource,
+                                    minIdentityConfidence: settings.analysis.minIdentityConfidence
+                                });
                                 const pipelineError = analysis.enrichment.flaggedAttributes.includes('analysis_error');
                                 const requiresReview = pipelineError || quality.requiresReview;
                                 const finalStatus: Contact['status'] = requiresReview ? 'Review Needed' : 'Enriched';
@@ -378,7 +391,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                                         summary: analysis.enrichment.summary,
                                         flags: analysis.enrichment.flaggedAttributes
                                     });
-                                    requestDebugPanelOpen();
+                                    if (autoOpenDebugOnFailure) requestDebugPanelOpen();
                                 } else if (quality.requiresReview) {
                                     summaries.push(`\u26a0 ${contact.name}: Review Needed - ${quality.issues.join(' ')}`);
                                 } else {
@@ -402,9 +415,9 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                                     steps: prev.steps.map(s => s.id === 'save' ? { ...s, status: 'done' } : s)
                                 }));
 
-                                // Rate limit delay between calls (1 second)
+                                // Delay between calls to reduce rate-limit pressure on provider APIs.
                                 if (processed < contactIds.length) {
-                                    await new Promise(resolve => setTimeout(resolve, 1000));
+                                    await new Promise(resolve => setTimeout(resolve, enrichmentDelayMs));
                                 }
                             } catch (e) {
                                 console.error(`Failed to enrich ${contact.name}:`, e);
@@ -414,7 +427,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                                     name: contact.name,
                                     error: e instanceof Error ? e.message : String(e)
                                 });
-                                requestDebugPanelOpen();
+                                if (autoOpenDebugOnFailure) requestDebugPanelOpen();
                             }
                         }
                     }
@@ -486,7 +499,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         } catch (err) {
             console.error("Chat error", err);
             debugError('chat', 'Chat request failed.', err);
-            requestDebugPanelOpen();
+            if (autoOpenDebugOnFailure) requestDebugPanelOpen();
             updateThread(currentThreadId, {
                 status: 'idle',
                 messages: [...updatedMessages, { id: Date.now().toString(), role: 'model', text: "Error: Connection interrupted." }]
@@ -605,7 +618,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                                     )}
                                     {msg.text}
                                 </div>
-                                {msg.groundingSources && msg.groundingSources.length > 0 && (
+                                {showGroundingSources && msg.groundingSources && msg.groundingSources.length > 0 && (
                                     <div className="flex flex-wrap gap-2 mt-2">
                                         {Array.from(new Set(msg.groundingSources.map(s => JSON.stringify(s)))).map((json) => JSON.parse(json as string)).map((source: any, idx) => (
                                             <a key={idx} href={source.uri} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 px-2 py-1 bg-slate-900 border border-slate-700 rounded text-[10px] text-slate-400 hover:text-blue-400 transition-colors">
@@ -641,7 +654,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                                 <div className="flex-1">
                                     <div className="text-sm text-white font-medium">{activeThread.toolStatus}</div>
                                     <div className="text-[10px] text-slate-500 mt-0.5">
-                                        Using {settings.analysisModel === 'fast' ? 'Gemini Flash' : 'Gemini Pro'} • Rate limited to 3 contacts/batch
+                                        Using {settings.analysisModel === 'fast' ? 'Gemini Flash' : 'Gemini Pro'} • Rate limited to {settings.chat.enrichmentBatchSize} contacts/batch
                                     </div>
                                 </div>
                             </div>

@@ -71,6 +71,7 @@ import {
     OrganizationWorkspacePackage
 } from '../types';
 import { mergeContactsWithDedupe } from './organizationService';
+import { createDefaultSettings, normalizeSettings } from './settingsService';
 
 export function saveContacts(contacts: Contact[]): void {
     try {
@@ -160,17 +161,15 @@ export function loadThreads(): ChatThread[] {
 // =====================
 export function saveSettings(settings: AppSettings): void {
     try {
-        localStorage.setItem(getStorageKey(BASE_KEYS.SETTINGS), JSON.stringify(settings));
+        localStorage.setItem(getStorageKey(BASE_KEYS.SETTINGS), JSON.stringify(normalizeSettings(settings)));
     } catch (e) {
         console.error('Failed to save settings:', e);
     }
 }
 
 export function loadSettings(): AppSettings {
-    return safeJsonParse(localStorage.getItem(getStorageKey(BASE_KEYS.SETTINGS)), {
-        focusMode: 'BALANCED' as const,
-        analysisModel: 'quality' as const,
-    });
+    const raw = safeJsonParse<unknown>(localStorage.getItem(getStorageKey(BASE_KEYS.SETTINGS)), createDefaultSettings());
+    return normalizeSettings(raw);
 }
 
 // =====================
@@ -265,7 +264,7 @@ export function importAllData(jsonString: string): boolean {
         if (data.knowledge) saveKnowledge(data.knowledge);
         if (data.ingestionHistory) saveIngestionHistory(data.ingestionHistory);
         if (data.threads) saveThreads(data.threads);
-        if (data.settings) saveSettings(data.settings);
+        if (data.settings) saveSettings(normalizeSettings(data.settings));
         if ('organization' in data) saveOrganization(data.organization || null);
         return true;
     } catch (e) {
@@ -478,7 +477,7 @@ export async function loadFromCloud(): Promise<{
         if (data.knowledge) saveKnowledge(data.knowledge);
         if (data.ingestionHistory) saveIngestionHistory(data.ingestionHistory);
         if (data.threads) saveThreads(data.threads);
-        if (data.settings) saveSettings(data.settings);
+        if (data.settings) saveSettings(normalizeSettings(data.settings));
         if ('organization' in data) saveOrganization(data.organization || null);
 
         // Update sync state
@@ -491,7 +490,7 @@ export async function loadFromCloud(): Promise<{
             knowledge: data.knowledge,
             ingestionHistory: data.ingestionHistory,
             threads: data.threads,
-            settings: data.settings,
+            settings: data.settings ? normalizeSettings(data.settings) : null,
             organization: data.organization || null
         };
 

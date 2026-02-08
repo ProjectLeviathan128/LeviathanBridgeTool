@@ -16,7 +16,7 @@ import {
   ZAxis,
   ReferenceLine,
 } from 'recharts';
-import { Contact, Organization } from '../types';
+import { AppSettings, Contact, Organization } from '../types';
 import {
   Activity,
   AlertTriangle,
@@ -36,6 +36,7 @@ import {
 
 interface DashboardProps {
   contacts: Contact[];
+  settings: AppSettings;
   organization?: Organization | null;
   onSelectContact?: (contactId: string) => void;
   onDeleteContact?: (contactId: string) => void;
@@ -139,6 +140,7 @@ function formatWhen(iso?: string): string {
 
 const Dashboard: React.FC<DashboardProps> = ({
   contacts,
+  settings,
   organization,
   onSelectContact,
   onDeleteContact,
@@ -167,10 +169,22 @@ const Dashboard: React.FC<DashboardProps> = ({
 
     const highValueContacts = contacts.filter((c) => {
       if (!c.scores || !c.enrichment) return false;
-      const investor = c.scores.investorFit.score >= 80;
-      const values = c.scores.valuesAlignment.score >= 70;
-      const connector = c.scores.connectorScore.score >= 75;
-      return (investor && values) || connector;
+      const investor = c.scores.investorFit.score >= settings.dashboard.highValueInvestorMin;
+      const values = c.scores.valuesAlignment.score >= settings.dashboard.highValueValuesMin;
+      const connector = c.scores.connectorScore.score >= settings.dashboard.highValueConnectorMin;
+      const weighted = Math.round(
+        c.scores.investorFit.score * 0.3 +
+        c.scores.valuesAlignment.score * 0.25 +
+        c.scores.connectorScore.score * 0.15 +
+        c.scores.maritimeRelevance.score * 0.15 +
+        c.scores.govtAccess.score * 0.05 +
+        c.scores.overallConfidence * 0.1
+      );
+      const penalty =
+        (c.status === 'Review Needed' ? 10 : 0) +
+        (c.enrichment.collisionRisk ? 12 : 0);
+      const opportunityScore = clamp(weighted - penalty, 0, 100);
+      return (investor && values) || connector || opportunityScore >= settings.analysis.highPriorityScoreThreshold;
     });
 
     const trackCounter = new Map<string, number>();
@@ -270,7 +284,7 @@ const Dashboard: React.FC<DashboardProps> = ({
         return a.name.localeCompare(b.name);
       });
 
-    const flaggedOutreachQueue = flaggedOutreachCandidates.slice(0, 8);
+    const flaggedOutreachQueue = flaggedOutreachCandidates.slice(0, settings.dashboard.priorityQueueSize);
     const flaggedOutreachTotal = flaggedOutreachCandidates.length;
 
     const priorityQueue: PriorityItem[] = contacts
@@ -302,11 +316,11 @@ const Dashboard: React.FC<DashboardProps> = ({
         };
       })
       .sort((a, b) => b.score - a.score)
-      .slice(0, 8);
+      .slice(0, settings.dashboard.priorityQueueSize);
 
     const riskQueue: RiskItem[] = contacts
       .filter((c) => {
-        const lowConfidence = (c.scores?.overallConfidence || 100) < 60;
+        const lowConfidence = (c.scores?.overallConfidence || 100) < settings.dashboard.riskLowConfidenceThreshold;
         const collision = c.enrichment?.collisionRisk || false;
         return c.status === 'Review Needed' || lowConfidence || collision;
       })
@@ -318,14 +332,14 @@ const Dashboard: React.FC<DashboardProps> = ({
         let severity = 0;
         if (collision) severity += 4;
         if (c.status === 'Review Needed') severity += 3;
-        if (confidence < 60) severity += 2;
+        if (confidence < settings.dashboard.riskLowConfidenceThreshold) severity += 2;
         if (lowEvidence) severity += 1;
 
         const reason =
           c.enrichment?.alignmentRisks[0] ||
           (collision
             ? 'Potential identity collision risk.'
-            : confidence < 60
+            : confidence < settings.dashboard.riskLowConfidenceThreshold
               ? 'Low confidence analysis.'
               : 'Needs manual review.');
 
@@ -338,7 +352,7 @@ const Dashboard: React.FC<DashboardProps> = ({
         };
       })
       .sort((a, b) => b.severity - a.severity)
-      .slice(0, 8);
+      .slice(0, settings.dashboard.riskQueueSize);
 
     const domainMap = new Map<string, number>();
     contacts.forEach((contact) => {
@@ -410,7 +424,7 @@ const Dashboard: React.FC<DashboardProps> = ({
       avgEvidencePerAnalyzed,
       latestVerified,
     };
-  }, [contacts]);
+  }, [contacts, settings]);
 
   const orgMemberCount = organization?.members.length || 0;
   const orgUpdatedLabel = organization

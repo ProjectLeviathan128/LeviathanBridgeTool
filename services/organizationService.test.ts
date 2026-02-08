@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Contact, OrganizationMember } from '../types';
 import {
+  INTRO_REQUEST_LIST,
   createOrganization,
   createOrganizationInviteCode,
   createOrganizationSyncPackage,
@@ -89,6 +90,64 @@ describe('organizationService', () => {
     const result = dedupeContacts(contacts);
     expect(result.contacts).toHaveLength(2);
     expect(result.duplicates).toBe(1);
+  });
+
+  it('honors latest collaboration timestamps when intro queue is removed', () => {
+    const older = makeContact({
+      id: 'c-intro-old',
+      name: 'Taylor Harbor',
+      location: 'Boston',
+      introRequested: true,
+      introRequestedAt: new Date('2026-02-01T10:00:00.000Z').toISOString(),
+      lists: [INTRO_REQUEST_LIST],
+      collaboration: {
+        introUpdatedAt: new Date('2026-02-01T10:00:00.000Z').toISOString(),
+        listsUpdatedAt: new Date('2026-02-01T10:00:00.000Z').toISOString(),
+      },
+    });
+
+    const newer = makeContact({
+      id: 'c-intro-new',
+      name: 'Taylor Harbor',
+      location: 'Boston',
+      introRequested: false,
+      lists: [],
+      collaboration: {
+        introUpdatedAt: new Date('2026-02-03T10:00:00.000Z').toISOString(),
+        listsUpdatedAt: new Date('2026-02-03T10:00:00.000Z').toISOString(),
+      },
+    });
+
+    const result = mergeContactsWithDedupe([older], [newer]);
+    expect(result.contacts).toHaveLength(1);
+    expect(result.contacts[0].introRequested).toBe(false);
+    expect(result.contacts[0].lists || []).not.toContain(INTRO_REQUEST_LIST);
+  });
+
+  it('honors latest collaboration timestamps when team flags are cleared', () => {
+    const older = makeContact({
+      id: 'c-flag-old',
+      name: 'Casey Anchor',
+      location: 'Miami',
+      teamFlagged: true,
+      collaboration: {
+        teamFlaggedUpdatedAt: new Date('2026-02-01T10:00:00.000Z').toISOString(),
+      },
+    });
+
+    const newer = makeContact({
+      id: 'c-flag-new',
+      name: 'Casey Anchor',
+      location: 'Miami',
+      teamFlagged: false,
+      collaboration: {
+        teamFlaggedUpdatedAt: new Date('2026-02-02T10:00:00.000Z').toISOString(),
+      },
+    });
+
+    const result = mergeContactsWithDedupe([older], [newer]);
+    expect(result.contacts).toHaveLength(1);
+    expect(result.contacts[0].teamFlagged).toBe(false);
   });
 
   it('creates, validates, and materializes invite codes', () => {

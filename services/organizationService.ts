@@ -138,15 +138,46 @@ function pickBestEnrichment(current: Contact, incoming: Contact): Contact['enric
     : current.enrichment;
 }
 
+function parseTimestampMs(value?: string): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function latestTimestamp(a?: string, b?: string): string | undefined {
+  const aMs = parseTimestampMs(a);
+  const bMs = parseTimestampMs(b);
+  if (aMs === 0 && bMs === 0) return a || b;
+  return bMs > aMs ? b : a;
+}
+
+function normalizeLists(lists?: string[]): string[] {
+  return [...new Set((lists || []).map((list) => list.trim()).filter(Boolean))];
+}
+
+function pickLatestBoolean(
+  currentValue: boolean | undefined,
+  currentUpdatedAt: string | undefined,
+  incomingValue: boolean | undefined,
+  incomingUpdatedAt: string | undefined,
+  fallback: () => boolean
+): boolean {
+  const currentMs = parseTimestampMs(currentUpdatedAt);
+  const incomingMs = parseTimestampMs(incomingUpdatedAt);
+  if (currentMs === 0 && incomingMs === 0) return fallback();
+  if (incomingMs > currentMs) return Boolean(incomingValue);
+  if (currentMs > incomingMs) return Boolean(currentValue);
+  if (incomingValue !== undefined) return Boolean(incomingValue);
+  return Boolean(currentValue);
+}
+
 export function mergeContactRecords(primary: Contact, duplicate: Contact): Contact {
   const combinedTags = [
     ...(primary.tags || []),
     ...(duplicate.tags || []),
   ];
-  const combinedLists = [
-    ...(primary.lists || []),
-    ...(duplicate.lists || []),
-  ];
+  const primaryLists = normalizeLists(primary.lists);
+  const duplicateLists = normalizeLists(duplicate.lists);
 
   const mergedRawText = (() => {
     const first = primary.rawText?.trim() ?? '';
@@ -156,18 +187,62 @@ export function mergeContactRecords(primary: Contact, duplicate: Contact): Conta
     return `${first}\n\n---\n\n${second}`;
   })();
 
-  const normalizedLists = [...new Set(combinedLists.map((list) => list.trim()).filter(Boolean))];
-  const introRequested = Boolean(
-    primary.introRequested ||
-    duplicate.introRequested ||
-    normalizedLists.includes(INTRO_REQUEST_LIST)
+  const primaryListMs = parseTimestampMs(primary.collaboration?.listsUpdatedAt);
+  const duplicateListMs = parseTimestampMs(duplicate.collaboration?.listsUpdatedAt);
+  let lists = (() => {
+    if (primaryListMs === 0 && duplicateListMs === 0) {
+      return [...new Set([...primaryLists, ...duplicateLists])];
+    }
+    if (duplicateListMs > primaryListMs) return duplicateLists;
+    if (primaryListMs > duplicateListMs) return primaryLists;
+    return duplicateLists;
+  })();
+
+  const introRequested = pickLatestBoolean(
+    primary.introRequested,
+    primary.collaboration?.introUpdatedAt,
+    duplicate.introRequested,
+    duplicate.collaboration?.introUpdatedAt,
+    () => Boolean(
+      primary.introRequested ||
+      duplicate.introRequested ||
+      primaryLists.includes(INTRO_REQUEST_LIST) ||
+      duplicateLists.includes(INTRO_REQUEST_LIST)
+    )
   );
-  const introRequestedAt = [primary.introRequestedAt, duplicate.introRequestedAt]
-    .filter((value): value is string => Boolean(value))
-    .sort()[0];
-  const lists = introRequested
-    ? [...new Set([...normalizedLists, INTRO_REQUEST_LIST])]
-    : normalizedLists.filter((list) => list !== INTRO_REQUEST_LIST);
+
+  lists = introRequested
+    ? [...new Set([...lists.filter((list) => list !== INTRO_REQUEST_LIST), INTRO_REQUEST_LIST])]
+    : lists.filter((list) => list !== INTRO_REQUEST_LIST);
+
+  const introRequestedAt = introRequested
+    ? (
+      [primary.introRequestedAt, duplicate.introRequestedAt]
+        .filter((value): value is string => Boolean(value))
+        .sort()[0] || new Date().toISOString()
+    )
+    : undefined;
+
+  const teamFlagged = pickLatestBoolean(
+    primary.teamFlagged,
+    primary.collaboration?.teamFlaggedUpdatedAt,
+    duplicate.teamFlagged,
+    duplicate.collaboration?.teamFlaggedUpdatedAt,
+    () => Boolean(primary.teamFlagged || duplicate.teamFlagged)
+  );
+
+  const collaboration = {
+    listsUpdatedAt: latestTimestamp(primary.collaboration?.listsUpdatedAt, duplicate.collaboration?.listsUpdatedAt),
+    teamFlaggedUpdatedAt: latestTimestamp(
+      primary.collaboration?.teamFlaggedUpdatedAt,
+      duplicate.collaboration?.teamFlaggedUpdatedAt
+    ),
+    introUpdatedAt: latestTimestamp(primary.collaboration?.introUpdatedAt, duplicate.collaboration?.introUpdatedAt),
+  };
+  const hasCollaborationMetadata = Boolean(
+    collaboration.listsUpdatedAt || collaboration.teamFlaggedUpdatedAt || collaboration.introUpdatedAt
+  );
+
   const outreachDrafts: NonNullable<Contact['outreachDrafts']> = [];
   [...(primary.outreachDrafts || []), ...(duplicate.outreachDrafts || [])].forEach((draft) => {
     const key = `${draft.channel}|${draft.senderId}|${draft.generatedAt}`;
@@ -185,9 +260,10 @@ export function mergeContactRecords(primary: Contact, duplicate: Contact): Conta
     source: bestString(primary.source, duplicate.source),
     tags: [...new Set(combinedTags.map((tag) => tag.trim()).filter(Boolean))],
     lists,
-    teamFlagged: Boolean(primary.teamFlagged || duplicate.teamFlagged),
+    teamFlagged,
     introRequested,
-    introRequestedAt: introRequested ? (introRequestedAt || new Date().toISOString()) : undefined,
+    introRequestedAt,
+    collaboration: hasCollaborationMetadata ? collaboration : undefined,
     outreachDrafts: outreachDrafts.slice(0, 8),
     rawText: mergedRawText,
     status: bestStatus(primary.status, duplicate.status),
@@ -294,18 +370,40 @@ export function createOrganization(args: {
 }
 
 export function upsertOrganizationMember(organization: Organization, member: OrganizationMember): Organization {
-  const existing = organization.members.find((m) => m.userId === member.userId);
-  if (existing) {
+  const normalizedMember: OrganizationMember = {
+    ...member,
+    role: organization.ownerId === member.userId ? 'owner' : member.role,
+  };
+  const existingIndex = organization.members.findIndex((m) => m.userId === normalizedMember.userId);
+  if (existingIndex >= 0) {
+    const existing = organization.members[existingIndex];
+    const mergedMember: OrganizationMember = {
+      ...existing,
+      ...normalizedMember,
+      joinedAt: existing.joinedAt || normalizedMember.joinedAt,
+    };
+
+    const unchanged =
+      existing.userId === mergedMember.userId &&
+      existing.username === mergedMember.username &&
+      existing.email === mergedMember.email &&
+      existing.role === mergedMember.role &&
+      existing.joinedAt === mergedMember.joinedAt;
+
+    if (unchanged) return organization;
+
+    const members = [...organization.members];
+    members[existingIndex] = mergedMember;
     return {
       ...organization,
-      members: organization.members.map((m) => (m.userId === member.userId ? { ...m, ...member } : m)),
+      members,
       updatedAt: Date.now(),
     };
   }
 
   return {
     ...organization,
-    members: [...organization.members, member],
+    members: [...organization.members, normalizedMember],
     updatedAt: Date.now(),
   };
 }

@@ -29,8 +29,8 @@ const ContactDetail: React.FC<ContactDetailProps> = ({
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isGeneratingOutreach, setIsGeneratingOutreach] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedChannel, setSelectedChannel] = useState<OutreachChannel>('linkedin');
-  const [selectedSender, setSelectedSender] = useState<OutreachSenderId>('nathan');
+  const [selectedChannel, setSelectedChannel] = useState<OutreachChannel>(settings.outreach.defaultChannel);
+  const [selectedSender, setSelectedSender] = useState<OutreachSenderId>(settings.outreach.defaultSender);
   const [generatedCopy, setGeneratedCopy] = useState('');
   const [generatedSubject, setGeneratedSubject] = useState('');
   const [copiedOutreach, setCopiedOutreach] = useState(false);
@@ -44,6 +44,8 @@ const ContactDetail: React.FC<ContactDetailProps> = ({
       setGeneratedSubject(latestDraft.subject || '');
       return;
     }
+    setSelectedChannel(settings.outreach.defaultChannel);
+    setSelectedSender(settings.outreach.defaultSender);
     setGeneratedCopy('');
     setGeneratedSubject('');
   }, [contact.id, contact.outreachDrafts]);
@@ -53,7 +55,11 @@ const ContactDetail: React.FC<ContactDetailProps> = ({
     setError(null);
     try {
       const result = await analyzeContactWithGemini(contact, settings);
-      const quality = assessEnrichmentQuality(result.enrichment);
+      const quality = assessEnrichmentQuality(result.enrichment, {
+        minEvidenceLinks: settings.analysis.minEvidenceLinks,
+        requireNonLinkedInSource: settings.analysis.requireNonLinkedInSource,
+        minIdentityConfidence: settings.analysis.minIdentityConfidence
+      });
       const isPipelineError = result.enrichment.flaggedAttributes.includes('analysis_error');
       if (isPipelineError) {
         setError(result.enrichment.summary);
@@ -95,13 +101,17 @@ const ContactDetail: React.FC<ContactDetailProps> = ({
   const handleGenerateOutreach = async () => {
     setIsGeneratingOutreach(true);
     try {
-      const draft = await generateOutreachDraft(contact, selectedChannel, selectedSender);
+      const draft = await generateOutreachDraft(contact, selectedChannel, selectedSender, {
+        linkedInMaxLength: settings.outreach.linkedInCharacterLimit,
+        emailSubjectMaxLength: settings.outreach.emailSubjectMaxLength,
+        temperature: settings.outreach.modelTemperature
+      });
       const nextDrafts = [
         draft,
         ...(contact.outreachDrafts || []).filter(
           (existing) => !(existing.channel === draft.channel && existing.senderId === draft.senderId)
         ),
-      ].slice(0, 8);
+      ].slice(0, settings.outreach.maxDraftsPerContact);
 
       setGeneratedCopy(draft.message);
       setGeneratedSubject(draft.subject || '');
@@ -495,8 +505,8 @@ const ContactDetail: React.FC<ContactDetailProps> = ({
                     {copiedOutreach ? 'Copied' : 'Copy'}
                   </button>
                   {selectedChannel === 'linkedin' && generatedCopy.trim() && (
-                    <span className={`text-[11px] ${generatedCopy.length <= 300 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {generatedCopy.length}/300
+                    <span className={`text-[11px] ${generatedCopy.length <= settings.outreach.linkedInCharacterLimit ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {generatedCopy.length}/{settings.outreach.linkedInCharacterLimit}
                     </span>
                   )}
                 </div>
@@ -518,7 +528,9 @@ const ContactDetail: React.FC<ContactDetailProps> = ({
                   className="w-full min-h-[170px] bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-blue-500 resize-y"
                 />
                 <p className="text-[11px] text-slate-500 mt-1">
-                  {selectedChannel === 'linkedin' ? 'LinkedIn stays under 300 characters.' : 'Email can be longer for higher-conviction outreach.'}
+                  {selectedChannel === 'linkedin'
+                    ? `LinkedIn stays under ${settings.outreach.linkedInCharacterLimit} characters.`
+                    : `Email subject target stays under ${settings.outreach.emailSubjectMaxLength} characters.`}
                 </p>
                 <p className="text-[11px] text-slate-500 mt-2">
                   Drafting as {getSenderProfile(selectedSender).name} ({getSenderProfile(selectedSender).title}).
