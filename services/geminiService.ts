@@ -1,13 +1,27 @@
-import { Contact, EnrichmentData, Scores, AppSettings, StrategicFocus, ScoreProvenance } from '../types';
+import { Contact, EnrichmentData, Scores, AppSettings, StrategicFocus, ScoreProvenance, Evidence } from '../types';
 import { bridgeMemory } from './bridgeMemory';
 import { extractLinkedInUrlFromContact, normalizeAnalysisOutput, parseToolCallFromText } from './enrichmentGuards';
+
+interface PuterChatOptions {
+    model?: string;
+    stream?: boolean;
+    tools?: Array<{ type: string }>;
+    temperature?: number;
+    [key: string]: unknown;
+}
 
 // Declare Puter global (loaded via script tag)
 declare const puter: {
     ai: {
-        chat: (prompt: string | object[], options?: { model?: string; stream?: boolean }) => Promise<any>;
+        chat: (prompt: string | object[], options?: PuterChatOptions) => Promise<any>;
+    };
+    net?: {
+        fetch: (url: string, options?: RequestInit) => Promise<Response>;
     };
 };
+
+const WEB_SEARCH_MODEL = 'openai/gpt-5.2-chat';
+const MIN_VERIFIED_EVIDENCE = 2;
 
 const BRIDGE_SYSTEM_INSTRUCTION = `
 ROLE: You are Bridge, an expert Contact Intelligence + Values-Aligned Matching System built exclusively for Project Leviathan.
@@ -48,8 +62,8 @@ const FOCUS_MODE_PROMPTS: Record<StrategicFocus, string> = {
 
 function getModelForSettings(settings: AppSettings): string {
     return settings.analysisModel === 'fast'
-        ? 'gemini-2.5-flash'
-        : 'gemini-2.5-pro';
+        ? 'openai/gpt-5-nano'
+        : WEB_SEARCH_MODEL;
 }
 
 // Helper to extract JSON from markdown-wrapped responses
@@ -65,6 +79,264 @@ function extractJSON(text: string): string {
         return objectMatch[0];
     }
     return text;
+}
+
+function extractJSONArray(text: string): string | null {
+    const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    const candidate = fenced ? fenced[1].trim() : text;
+    const arrayMatch = candidate.match(/\[[\s\S]*\]/);
+    return arrayMatch ? arrayMatch[0] : null;
+}
+
+function responseToText(response: any): string {
+    if (typeof response === 'string') return response;
+    if (typeof response?.message?.content === 'string') return response.message.content;
+    if (Array.isArray(response?.message?.content)) {
+        return response.message.content
+            .map((part: any) => {
+                if (typeof part === 'string') return part;
+                if (typeof part?.text === 'string') return part.text;
+                return '';
+            })
+            .join('\n')
+            .trim();
+    }
+    if (typeof response?.text === 'string') return response.text;
+    return JSON.stringify(response);
+}
+
+function isValidHttpUrl(url: string): boolean {
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+function cleanUrl(url: string): string {
+    return url.trim().replace(/[),.;:!?]+$/, '');
+}
+
+function normalizeEvidenceCandidates(rawEvidence: any[]): Evidence[] {
+    const seen = new Set<string>();
+    return rawEvidence
+        .map((entry: any) => {
+            const claim = typeof entry?.claim === 'string' ? entry.claim.trim() : '';
+            const rawUrl = typeof entry?.url === 'string' ? cleanUrl(entry.url) : '';
+            const url = isValidHttpUrl(rawUrl) ? rawUrl : '';
+            const confidence =
+                typeof entry?.confidence === 'number' && Number.isFinite(entry.confidence)
+                    ? Math.max(0, Math.min(100, entry.confidence))
+                    : 60;
+            const timestampRaw =
+                typeof entry?.timestamp === 'string' && !Number.isNaN(Date.parse(entry.timestamp))
+                    ? entry.timestamp
+                    : new Date().toISOString();
+            if (!claim || !url) return null;
+            const key = `${claim}|${url}`;
+            if (seen.has(key)) return null;
+            seen.add(key);
+            return {
+                claim,
+                url,
+                timestamp: new Date(timestampRaw).toISOString(),
+                confidence,
+            } as Evidence;
+        })
+        .filter((entry): entry is Evidence => Boolean(entry));
+}
+
+function extractHttpUrls(text: string): string[] {
+    const matches = text.match(/https?:\/\/[^\s)"'<>]+/g) || [];
+    const deduped: string[] = [];
+    const seen = new Set<string>();
+
+    matches.forEach((candidate) => {
+        const cleaned = cleanUrl(candidate);
+        if (!isValidHttpUrl(cleaned)) return;
+        if (seen.has(cleaned)) return;
+        seen.add(cleaned);
+        deduped.push(cleaned);
+    });
+
+    return deduped;
+}
+
+function hostnameForUrl(url: string): string {
+    try {
+        return new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    } catch {
+        return '';
+    }
+}
+
+interface EvidenceGateResult {
+    passed: boolean;
+    issues: string[];
+}
+
+function evaluateEvidenceGate(verifiedEvidence: Evidence[]): EvidenceGateResult {
+    const issues: string[] = [];
+    const hostnames = Array.from(
+        new Set(
+            verifiedEvidence
+                .map((ev) => hostnameForUrl(ev.url))
+                .filter((host) => host.length > 0)
+        )
+    );
+
+    if (verifiedEvidence.length < MIN_VERIFIED_EVIDENCE) {
+        issues.push(`Insufficient external evidence (need at least ${MIN_VERIFIED_EVIDENCE} verified links).`);
+    }
+
+    if (hostnames.length < 2 && verifiedEvidence.length > 0) {
+        issues.push('Evidence lacks source diversity (need at least 2 distinct domains).');
+    }
+
+    const hasNonLinkedInSource = hostnames.some((host) => !/(^|\.)linkedin\.com$/i.test(host));
+    if (verifiedEvidence.length > 0 && !hasNonLinkedInSource) {
+        issues.push('Evidence is only from LinkedIn; add at least one non-LinkedIn source.');
+    }
+
+    return {
+        passed: issues.length === 0,
+        issues,
+    };
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms);
+        promise
+            .then((value) => {
+                clearTimeout(timer);
+                resolve(value);
+            })
+            .catch((error) => {
+                clearTimeout(timer);
+                reject(error);
+            });
+    });
+}
+
+async function verifyUrlReachable(url: string): Promise<boolean> {
+    if (!puter?.net?.fetch) return false;
+
+    try {
+        const headResponse = await withTimeout(
+            puter.net.fetch(url, { method: 'HEAD' }),
+            8000
+        );
+        if (headResponse.ok || (headResponse.status >= 200 && headResponse.status < 400)) {
+            return true;
+        }
+    } catch {
+        // Fall through to GET.
+    }
+
+    try {
+        const getResponse = await withTimeout(
+            puter.net.fetch(url, { method: 'GET' }),
+            10000
+        );
+        return getResponse.ok || (getResponse.status >= 200 && getResponse.status < 400);
+    } catch {
+        return false;
+    }
+}
+
+async function verifyEvidenceLinks(evidenceLinks: Evidence[]): Promise<Evidence[]> {
+    const checks = await Promise.all(
+        evidenceLinks.slice(0, 8).map(async (ev) => {
+            const reachable = await verifyUrlReachable(ev.url);
+            return reachable ? ev : null;
+        })
+    );
+    return checks.filter((ev): ev is Evidence => Boolean(ev));
+}
+
+async function gatherWebEvidenceForContact(contact: Contact): Promise<Evidence[]> {
+    const linkedInSeed = extractLinkedInUrlFromContact(contact);
+    const evidencePrompt = `
+You are conducting contact due diligence.
+Use web search to find verifiable public evidence for this person.
+
+Target:
+- Name: ${contact.name}
+- Headline: ${contact.headline}
+- Location: ${contact.location}
+- Source Text: ${contact.source}
+- Raw Notes: ${contact.rawText || 'None'}
+- Known LinkedIn URL: ${linkedInSeed || 'None'}
+
+Rules:
+- Return ONLY a JSON array.
+- Include 3 to 6 evidence objects.
+- Prefer one LinkedIn URL (if present) and multiple non-LinkedIn sources.
+- No placeholders. No guessed or fake URLs.
+
+Schema:
+[
+  {"claim":"string","url":"https://...","timestamp":"ISO date","confidence":0-100}
+]
+`;
+
+    try {
+        const response = await puter.ai.chat(evidencePrompt, {
+            model: WEB_SEARCH_MODEL,
+            tools: [{ type: 'web_search' }],
+            temperature: 0.1,
+        });
+
+        const responseText = responseToText(response);
+        const extractedArray = extractJSONArray(responseText);
+
+        let candidateEvidence: Evidence[] = [];
+        if (extractedArray) {
+            try {
+                candidateEvidence = normalizeEvidenceCandidates(JSON.parse(extractedArray));
+            } catch {
+                candidateEvidence = [];
+            }
+        }
+
+        if (candidateEvidence.length === 0) {
+            try {
+                const extractedObject = extractJSON(responseText);
+                const parsedObject = JSON.parse(extractedObject);
+                candidateEvidence = normalizeEvidenceCandidates(parsedObject?.evidenceLinks || []);
+            } catch {
+                candidateEvidence = [];
+            }
+        }
+
+        if (candidateEvidence.length === 0) {
+            candidateEvidence = extractHttpUrls(responseText)
+                .slice(0, 6)
+                .map((url) => ({
+                    claim: `Source discovered during web due diligence for ${contact.name}.`,
+                    url,
+                    timestamp: new Date().toISOString(),
+                    confidence: 55,
+                }));
+        }
+
+        if (linkedInSeed && !candidateEvidence.some((ev) => ev.url.includes('linkedin.com'))) {
+            candidateEvidence.unshift({
+                claim: 'LinkedIn profile imported from source data.',
+                url: linkedInSeed,
+                timestamp: new Date().toISOString(),
+                confidence: 60,
+            });
+        }
+
+        const verifiedEvidence = await verifyEvidenceLinks(candidateEvidence);
+        return verifiedEvidence;
+    } catch (error) {
+        console.error('Web evidence gathering failed:', error);
+        return [];
+    }
 }
 
 // Create default score provenance
@@ -88,6 +360,7 @@ export async function analyzeContactWithGemini(
     const thesisContext = bridgeMemory.getThesisContext();
     const model = getModelForSettings(settings);
     const linkedInSeed = extractLinkedInUrlFromContact(contact);
+    const verifiedEvidence = await gatherWebEvidenceForContact(contact);
 
     const prompt = `
 ${BRIDGE_SYSTEM_INSTRUCTION}
@@ -107,10 +380,12 @@ Raw Notes: ${contact.rawText || 'None'}
 Known LinkedIn URL: ${linkedInSeed || 'None provided'}
 
 === VERIFICATION RULES ===
-- You must use web research, including LinkedIn when available, before scoring.
-- Every non-trivial claim must map to at least one evidence URL.
-- Use at least 2 evidence links across at least 2 domains when possible.
-- If verification is weak, reduce identityConfidence and state uncertainty directly.
+- You are restricted to the VERIFIED_EVIDENCE list below.
+- Do not introduce new facts or URLs not present in VERIFIED_EVIDENCE.
+- If evidence is weak or sparse, lower confidence and mark risks clearly.
+
+=== VERIFIED_EVIDENCE ===
+${verifiedEvidence.length > 0 ? JSON.stringify(verifiedEvidence, null, 2) : '[]'}
 
 === YOUR TASK ===
 Analyze this contact and return a JSON object with the following structure. DO NOT include markdown code blocks, just return raw JSON:
@@ -139,24 +414,43 @@ Analyze this contact and return a JSON object with the following structure. DO N
 `;
 
     try {
+        const evidenceGate = evaluateEvidenceGate(verifiedEvidence);
+        if (!evidenceGate.passed) {
+            return {
+                scores: {
+                    investorFit: createDefaultProvenance(0, 'Insufficient verified evidence'),
+                    valuesAlignment: createDefaultProvenance(0, 'Insufficient verified evidence'),
+                    govtAccess: createDefaultProvenance(0, 'Insufficient verified evidence'),
+                    maritimeRelevance: createDefaultProvenance(0, 'Insufficient verified evidence'),
+                    connectorScore: createDefaultProvenance(0, 'Insufficient verified evidence'),
+                    overallConfidence: 0,
+                },
+                enrichment: {
+                    summary: 'Enrichment blocked: not enough verifiable web evidence was found.',
+                    alignmentRisks: evidenceGate.issues,
+                    evidenceLinks: verifiedEvidence,
+                    recommendedAngle: 'Do not outreach yet; collect additional verification sources.',
+                    recommendedAction: 'Re-run enrichment after improving source profile and identifiers.',
+                    tracks: [],
+                    flaggedAttributes: ['manual_review_required', 'insufficient_evidence', 'evidence_gate_blocked'],
+                    identityConfidence: 0,
+                    collisionRisk: true,
+                    lastVerified: new Date().toISOString(),
+                },
+            };
+        }
+
         const response = await puter.ai.chat(prompt, { model });
 
-        // Handle response - Puter returns the text directly or as an object
-        let responseText: string;
-        if (typeof response === 'string') {
-            responseText = response;
-        } else if (response?.message?.content) {
-            responseText = response.message.content;
-        } else if (response?.text) {
-            responseText = response.text;
-        } else {
-            responseText = JSON.stringify(response);
-        }
+        const responseText = responseToText(response);
 
         // Extract, parse, and normalize model output before it reaches UI state
         const jsonText = extractJSON(responseText);
         const parsedResult = JSON.parse(jsonText);
-        return normalizeAnalysisOutput(parsedResult, contact);
+        const normalized = normalizeAnalysisOutput(parsedResult, contact);
+        normalized.enrichment.evidenceLinks = verifiedEvidence;
+        normalized.enrichment.lastVerified = new Date().toISOString();
+        return normalized;
     } catch (error) {
         console.error('Gemini analysis error:', error);
 

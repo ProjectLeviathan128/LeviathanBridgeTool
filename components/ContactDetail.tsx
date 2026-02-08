@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Contact, ScoreProvenance, AppSettings } from '../types';
 import { ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar } from 'recharts';
 import { analyzeContactWithGemini } from '../services/geminiService';
+import { assessEnrichmentQuality } from '../services/enrichmentGuards';
 import { AlertOctagon, Brain, X, Loader2, ShieldAlert, Fingerprint, History, Info, ExternalLink, RefreshCw } from 'lucide-react';
 
 interface ContactDetailProps {
@@ -20,14 +21,15 @@ const ContactDetail: React.FC<ContactDetailProps> = ({ contact, onClose, onUpdat
     setError(null);
     try {
       const result = await analyzeContactWithGemini(contact, settings);
+      const quality = assessEnrichmentQuality(result.enrichment);
       onUpdate({
         ...contact,
-        status: 'Enriched',
+        status: quality.requiresReview ? 'Review Needed' : 'Enriched',
         scores: result.scores,
         enrichment: result.enrichment
       });
     } catch (err) {
-      setError('Analysis failed. Please check API key and try again.');
+      setError('Analysis failed. Please try again.');
     } finally {
       setIsAnalyzing(false);
     }
